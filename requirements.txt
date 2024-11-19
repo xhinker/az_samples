@@ -1,0 +1,10 @@
+-f https://download.pytorch.org/whl/cu118
+torch
+torchvision
+torchaudio
+
+transformers
+diffusers
+numpy
+scikit-learn
+jupyterlab
