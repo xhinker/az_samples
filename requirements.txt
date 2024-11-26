@@ -12,3 +12,4 @@ sentencepiece
 numpy
 scikit-learn
 jupyterlab
+matplotlib

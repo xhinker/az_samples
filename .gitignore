@@ -1,2 +1,5 @@
 .vscode
 *_venv*
+*.zip
+*.tar
+applications/remove_watermark
