@@ -3,8 +3,12 @@ torch
 torchvision
 torchaudio
 
+accelerate
+bitsandbytes
+protobuf
 transformers
 diffusers
+sentencepiece
 numpy
 scikit-learn
 jupyterlab
