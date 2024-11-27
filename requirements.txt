@@ -13,3 +13,4 @@ numpy
 scikit-learn
 jupyterlab
 matplotlib
+huggingface_hub
