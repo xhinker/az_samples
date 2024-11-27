@@ -110,12 +110,12 @@ logits      = logits[sorted_ind]
 
 show_masks(image, masks, scores, point_coords=input_point, input_labels=input_label, borders=True)
 
-#%% select object with box
+#%% select object with box, do not support multiple boxes
 input_box = np.array([425, 600, 700, 875])
 masks, scores, _ = predictor.predict(
-    point_coords=None,
-    point_labels=None,
-    box=input_box[None, :],
+    point_coords    = None,
+    point_labels    = None,
+    box             = input_box[None, :],
     multimask_output=False,
 )
 show_masks(image, masks, scores, box_coords=input_box)

@@ -14,3 +14,5 @@ scikit-learn
 jupyterlab
 matplotlib
 huggingface_hub
+flash_attn
+timm
