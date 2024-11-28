@@ -16,3 +16,4 @@ matplotlib
 huggingface_hub
 flash_attn
 timm
+optimum-quanto

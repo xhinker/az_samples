@@ -34,8 +34,8 @@ model               = dino_load_model(
     , model_weight_path
     , device        = dino_device
 )
-BOX_TRESHOLD        = 0.3
-TEXT_TRESHOLD       = 0.3
+BOX_TRESHOLD        = 0.4
+TEXT_TRESHOLD       = 0.4
 
 
 #%% start sam2 to get the mask
@@ -53,11 +53,11 @@ sam2_predictor = load_sam2_model(
 )
 
 #%% get boxes using dino 
-# IMAGE_PATH          = "./images/jeans.png"
-IMAGE_PATH          = "./images/one_truck.png"
+IMAGE_PATH          = "./images/jeans.png"
+# IMAGE_PATH          = "./images/one_truck.png"
 # IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/azcode/az_projects/model_tests/.model_test/image-2.png"
 TEXT_PROMPT         = """
-car rearview mirror
+jeans
 """
 image_source, image = dino_load_image(IMAGE_PATH)
 
@@ -98,4 +98,5 @@ masks, scores, _ = sam2_predictor.predict(
 show_masks(image, masks, scores, box_coords=input_box)
 
 pil_mask = get_mask_img(masks[0])
+pil_mask.save('mask.png')
 pil_mask
