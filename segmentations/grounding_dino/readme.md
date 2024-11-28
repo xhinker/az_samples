@@ -14,6 +14,5 @@ And boom, we have the magical semantic object detector.
 
 The box may include multiple items which lead to fail drawing the mask output. 
 
-
 ## Solution 2, Use GroundingDINO
 https://github.com/IDEA-Research/GroundingDINO
