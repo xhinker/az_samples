@@ -57,7 +57,7 @@ IMAGE_PATH          = "./images/jeans.png"
 # IMAGE_PATH          = "./images/one_truck.png"
 # IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/azcode/az_projects/model_tests/.model_test/image-2.png"
 TEXT_PROMPT         = """
-jeans
+black shirt
 """
 image_source, image = dino_load_image(IMAGE_PATH)
 
@@ -100,3 +100,25 @@ show_masks(image, masks, scores, box_coords=input_box)
 pil_mask = get_mask_img(masks[0])
 pil_mask.save('mask.png')
 pil_mask
+
+#%%
+# def get_mask_img_test(mask:np.ndarray):
+#     # get h and w, -2 means get last two numbers of shape array
+#     h, w = mask.shape[-2:]
+#     # set white background color
+#     color = np.array([1, 1, 1])
+#     # expand mask image to hxwxc (c is 3 channels here)
+#     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, 3)
+#     # OpenCV primarily works with 8-bit (uint8) or 32-bit floating-point (float32) images for most operations.
+#     # mask_image_uint8 = ((1 - mask_image) * 255).astype(np.uint8) 
+#     mask_image_uint8 = ((mask_image) * 255).astype(np.uint8) 
+#     # convert BGR to RGB
+#     mask_rgb = cv2.cvtColor(mask_image_uint8, cv2.COLOR_BGR2RGB)
+#     # convert cv2 image to PIL image
+#     pil_mask = Image.fromarray(mask_rgb)
+#     return pil_mask
+
+# pil_mask_test = get_mask_img_test(masks[0])
+# pil_mask_test
+# #%%
+# pil_mask_test.save("mask_revert.png")

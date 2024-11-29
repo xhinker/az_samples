@@ -1,6 +1,6 @@
 #%%
 from diffusers import DiffusionPipeline, FluxTransformer2DModel
-from torchao.quantization import quantize_, int8_weight_only, int4_weight_only
+from torchao.quantization import quantize_, int8_weight_only
 import torch
 
 #%%

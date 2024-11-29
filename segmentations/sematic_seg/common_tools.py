@@ -101,7 +101,8 @@ def get_mask_img(mask:np.ndarray):
     # expand mask image to hxwxc (c is 3 channels here)
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, 3)
     # OpenCV primarily works with 8-bit (uint8) or 32-bit floating-point (float32) images for most operations.
-    mask_image_uint8 = ((1 - mask_image) * 255).astype(np.uint8) 
+    # mask_image_uint8 = ((1 - mask_image) * 255).astype(np.uint8) 
+    mask_image_uint8 = ((mask_image) * 255).astype(np.uint8) 
     # convert BGR to RGB
     mask_rgb = cv2.cvtColor(mask_image_uint8, cv2.COLOR_BGR2RGB)
     # convert cv2 image to PIL image
