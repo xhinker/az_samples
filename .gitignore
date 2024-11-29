@@ -3,3 +3,4 @@
 *.zip
 *.tar
 applications/remove_watermark
+*_private*

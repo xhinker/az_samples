@@ -17,3 +17,4 @@ huggingface_hub
 flash_attn
 timm
 optimum-quanto
+git+https://github.com/xhinker/sd_embed.git@main
