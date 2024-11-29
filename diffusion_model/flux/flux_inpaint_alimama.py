@@ -1,6 +1,6 @@
 '''
 use diffusers==0.30.2
-Try downgrade your diffusers==0.30.2 and transformers==4.42.0
+Try downgrade your diffusers==0.30.2 and transformers==4.42.0 (optional)
 
 Seems not very good so far, seems under trained. 
 '''
@@ -34,7 +34,6 @@ quantize_(
     , device = device
 )
 
-#%%
 pipe = FluxControlNetInpaintingPipeline.from_pretrained(
     checkpoint_model_path
     , controlnet    = controlnet
@@ -47,10 +46,14 @@ pipe.controlnet.to(torch.bfloat16)
 pipe.enable_model_cpu_offload()
 
 #%%
+# image_path     = "https://raw.githubusercontent.com/CompVis/latent-diffusion/main/data/inpainting_examples/overture-creations-5sI6fQgYIuo.png"
+# mask_path    = "https://raw.githubusercontent.com/CompVis/latent-diffusion/main/data/inpainting_examples/overture-creations-5sI6fQgYIuo_mask.png"
+# prompt      = "A pure white cat sitting on a bench"
+
 image_path  = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/images/jeans.png'
 mask_path   = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/mask.png'
 prompt      = """\
-A woman with blonde hair standing like a model. She is wearing leather jacket in white color.
+her upbody wear pink Plaid shirt
 """
 
 # Set image path , mask path and prompt
@@ -74,12 +77,12 @@ result = pipe(
     , width                         = size[0]
     , control_image                 = image
     , control_mask                  = mask
-    , num_inference_steps           = 20
-    , generator                     = torch.Generator(device="cuda").manual_seed(25)
-    , controlnet_conditioning_scale = 0.9
+    , num_inference_steps           = 25
+    , generator                     = torch.Generator(device="cuda").manual_seed(123)
+    , controlnet_conditioning_scale = 0.75
     , guidance_scale                = 3.5
     , negative_prompt               = ""
-    , true_guidance_scale           = 1.5#1.0 # default: 3.5 for alpha and 1.0 for beta
+    , true_guidance_scale           = 1.2 #1.0 # default: 3.5 for alpha and 1.0 for beta
 ).images[0]
 
 result.save('output_images/flux_inpaint.png')

@@ -53,11 +53,15 @@ sam2_predictor = load_sam2_model(
 )
 
 #%% get boxes using dino 
-IMAGE_PATH          = "./images/jeans.png"
+import os
+IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_model/flux/source_images/suit_w_bag.png"
+IMAGE_FOLDER        = os.path.dirname(IMAGE_PATH)
+IMAGE_NAME          = os.path.basename(IMAGE_PATH)
+IMAGE_NAME_wo_ext,_   = os.path.splitext(IMAGE_NAME)
 # IMAGE_PATH          = "./images/one_truck.png"
 # IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/azcode/az_projects/model_tests/.model_test/image-2.png"
-TEXT_PROMPT         = """
-black shirt
+TEXT_PROMPT         = """\
+vest wearer inside of the jacket
 """
 image_source, image = dino_load_image(IMAGE_PATH)
 
@@ -83,11 +87,12 @@ xyxy_boxes = get_xyxy_boxes(boxes, image_source)
 print(xyxy_boxes)
 
 #%% get mask using detected boxes
+index = 0
 image           = load_image(IMAGE_PATH)
 display(image)
 sam2_predictor.set_image(image)
 
-input_box = np.array(xyxy_boxes[0])
+input_box = np.array(xyxy_boxes[index])
 
 masks, scores, _ = sam2_predictor.predict(
     point_coords    = None,
@@ -97,8 +102,9 @@ masks, scores, _ = sam2_predictor.predict(
 )
 show_masks(image, masks, scores, box_coords=input_box)
 
-pil_mask = get_mask_img(masks[0])
-pil_mask.save('mask.png')
+pil_mask = get_mask_img(masks[index])
+mask_path = os.path.join(IMAGE_FOLDER,f"{IMAGE_NAME_wo_ext}_mask.png")
+pil_mask.save(mask_path)
 pil_mask
 
 #%%

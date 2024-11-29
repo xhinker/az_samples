@@ -4,7 +4,8 @@ from torchao.quantization import quantize_, int8_weight_only
 import torch
 
 #%%
-model_path = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-dev_main"
+model_path  = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-dev_main"
+device      = "cuda:0"
 
 # load transformer model and quantize to int8
 transformer = FluxTransformer2DModel.from_pretrained(
