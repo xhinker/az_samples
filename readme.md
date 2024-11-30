@@ -1,4 +1,24 @@
 # Andrew Zhu's Sample Codes
 
-Repo for sample code sharing. You'd better setup a virtual python environment to avoid messing up your Python runtime.
+Previously, I put my sample code in one of my private repository, the repo becomes like a chaos and impossible to manage, and becomes unreadable (not mention execution it again) gradually. 
 
+So that decide to setup this public repository to host all of my daily sample code with better structure and comments. 
+
+## Setup Environment
+
+If you want to run some of the code from this repo, to avoid messing up your Python runtime, you'd better setup a virtual python environment and install the packages list in `requirements.txt` file.
+
+
+## What sample code inside of this rep
+
+### Diffusion related model
+
+1. Stable Diffusion 1.5, see folder: `diffusion_models/sd15`
+2. Stable Diffusion XL, see folder: `diffusion_models/sdxl`
+3. Stable Diffusion SD35, see folder: `diffusion_models/sd35`
+4. Flux.1, see folder: `diffusion_models/flux`
+
+### Segmentation
+
+1. Florence2, see folder: `segmentations/florence2`
+2. GroundingDino: `segatmentations/grounding_dino`
