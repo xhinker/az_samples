@@ -16,7 +16,7 @@ transformer = FluxTransformer2DModel.from_pretrained(
 quantize_(
     transformer
     , int8_weight_only()
-    , device = "cuda:0"
+    , device = device
 )
 
 #%%

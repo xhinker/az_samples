@@ -54,14 +54,12 @@ sam2_predictor = load_sam2_model(
 
 #%% get boxes using dino 
 import os
-IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_model/flux/source_images/suit_w_bag.png"
+IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_s1.png"
 IMAGE_FOLDER        = os.path.dirname(IMAGE_PATH)
 IMAGE_NAME          = os.path.basename(IMAGE_PATH)
 IMAGE_NAME_wo_ext,_   = os.path.splitext(IMAGE_NAME)
-# IMAGE_PATH          = "./images/one_truck.png"
-# IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/azcode/az_projects/model_tests/.model_test/image-2.png"
 TEXT_PROMPT         = """\
-vest wearer inside of the jacket
+watermark, text
 """
 image_source, image = dino_load_image(IMAGE_PATH)
 
