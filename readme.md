@@ -1,4 +1,4 @@
-# Andrew Zhu's Sample Codes
+# Andrew Zhu's Sample Code
 
 Previously, I put my sample code in one of my private repository, the repo becomes like a chaos and impossible to manage, and becomes unreadable (not mention execution it again) gradually. 
 
