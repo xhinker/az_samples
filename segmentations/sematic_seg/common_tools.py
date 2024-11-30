@@ -109,6 +109,108 @@ def get_mask_img(mask:np.ndarray):
     pil_mask = Image.fromarray(mask_rgb)
     return pil_mask
 
+def get_mask_img_margin(mask: np.ndarray, margin: int = 0):
+    """
+    Convert a binary mask ndarray to a PIL image with optional margin expansion.
+
+    Args:
+        mask (np.ndarray): Binary mask array (2D or 3D with last dim=1).
+        margin (int, optional): Expand mask edges by this many pixels. Defaults to 0.
+
+    Returns:
+        PIL.Image: Mask image with expanded edges (if applicable) and white background.
+    """
+
+    # Get height and width from the input mask shape
+    h, w = mask.shape[-2:]
+
+    # Ensure mask is binary (0s and 1s) and has only one channel
+    mask = (mask > 0).reshape(h, w)
+
+    # Apply margin expansion using morphological dilation
+    if margin > 0:
+        kernel = np.ones((margin*2+1, margin*2+1), np.uint8)
+        mask_with_margin = cv2.dilate(mask.astype(np.uint8), kernel)
+    else:
+        mask_with_margin = mask
+
+    # Set white background color
+    color = np.array([1, 1, 1])
+
+    # Expand mask image to hxwxc (c is 3 channels here)
+    mask_image = mask_with_margin.reshape(h, w, 1) * color.reshape(1, 1, 3)
+
+    # Convert to uint8 and scale values to [0, 255]
+    mask_image_uint8 = (mask_image * 255).astype(np.uint8)
+
+    # Convert BGR to RGB
+    mask_rgb = cv2.cvtColor(mask_image_uint8, cv2.COLOR_BGR2RGB)
+
+    # Convert cv2 image to PIL image
+    pil_mask = Image.fromarray(mask_rgb)
+
+    return pil_mask
+
+def get_combine_masks(masks: list[np.ndarray], margin: int = 0) -> Image:
+    """
+    Combine a list of binary ndarray masks into a single PIL mask image with optional margin expansion.
+
+    Args:
+        masks (list[np.ndarray]): List of binary mask arrays (2D or 3D with last dim=1) of the same size.
+        margin (int, optional): Expand combined mask edges by this many pixels. Defaults to 0.
+
+    Returns:
+        PIL.Image: Combined mask image with expanded edges (if applicable) and white background.
+    """
+
+    # Input validation
+    if not masks:
+        raise ValueError("Input list of masks is empty")
+    
+    # Get the shape of the first mask (assuming all masks have the same shape)
+    ref_shape = masks[0].shape
+    
+    # Validate that all masks have the same shape
+    for mask in masks:
+        if mask.shape != ref_shape:
+            raise ValueError("All masks must have the same shape")
+
+    # Initialize the combined mask with zeros
+    combined_mask = np.zeros(ref_shape, dtype=np.bool_)
+
+    # Iterate over each mask, performing a logical OR to combine them
+    for mask in masks:
+        # Ensure mask is binary (0s and 1s) and has only one channel
+        mask_binary = (mask > 0).reshape(ref_shape[:2])
+        combined_mask = np.logical_or(combined_mask, mask_binary)
+
+    # Apply margin expansion using morphological dilation (if margin > 0)
+    if margin > 0:
+        kernel = np.ones((margin*2+1, margin*2+1), np.uint8)
+        combined_mask_expanded = cv2.dilate(combined_mask.astype(np.uint8), kernel)
+    else:
+        combined_mask_expanded = combined_mask
+
+    # Set white background color
+    color = np.array([1, 1, 1])
+
+    # Expand combined mask image to hxwxc (c is 3 channels here)
+    combined_mask_image = combined_mask_expanded.reshape(*ref_shape[:2], 1) * color
+
+    # Convert to uint8 and scale values to [0, 255]
+    combined_mask_image_uint8 = (combined_mask_image * 255).astype(np.uint8)
+
+    # Convert BGR to RGB (if needed, for PIL compatibility)
+    if combined_mask_image_uint8.ndim == 3:  # Color image
+        combined_mask_rgb = cv2.cvtColor(combined_mask_image_uint8, cv2.COLOR_BGR2RGB)
+    else:  # Grayscale image (already compatible)
+        combined_mask_rgb = combined_mask_image_uint8
+
+    # Convert cv2 image to PIL image
+    pil_combined_mask = Image.fromarray(combined_mask_rgb)
+
+    return pil_combined_mask
+
 def show_points(coords, labels, ax, marker_size=375):
     pos_points = coords[labels==1]
     neg_points = coords[labels==0]

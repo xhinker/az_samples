@@ -56,7 +56,7 @@ pipe.enable_model_cpu_offload()
 # """
 image_path  = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_s1.png'
 mask_path   = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_s1_mask.png'
-prompt      = "no text and watermark"
+prompt      = ""
 
 # Set image path , mask path and prompt
 # image_path  = 'https://huggingface.co/alimama-creative/FLUX.1-dev-Controlnet-Inpainting-Alpha/resolve/main/images/bucket.png'

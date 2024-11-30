@@ -21,6 +21,8 @@ from common_tools import (
     , get_xyxy_boxes
     , show_masks
     , get_mask_img
+    , get_mask_img_margin
+    , get_combine_masks
 )
 
 dino_device = "cuda:1"
@@ -34,8 +36,6 @@ model               = dino_load_model(
     , model_weight_path
     , device        = dino_device
 )
-BOX_TRESHOLD        = 0.4
-TEXT_TRESHOLD       = 0.4
 
 
 #%% start sam2 to get the mask
@@ -63,6 +63,8 @@ watermark, text
 """
 image_source, image = dino_load_image(IMAGE_PATH)
 
+BOX_TRESHOLD        = 0.35
+TEXT_TRESHOLD       = 0.1
 boxes, logits, phrases = dino_predict(
     model               = model
     , image             = image
@@ -84,7 +86,29 @@ show_cv2_img(annotated_frame)
 xyxy_boxes = get_xyxy_boxes(boxes, image_source)
 print(xyxy_boxes)
 
-#%% get mask using detected boxes
+#%% get combined mask
+image           = load_image(IMAGE_PATH)
+display(image)
+sam2_predictor.set_image(image)
+
+masks_list = []
+for i,box in enumerate(xyxy_boxes):
+    input_box = np.array(xyxy_boxes[i])
+    masks, scores, _ = sam2_predictor.predict(
+        point_coords    = None,
+        point_labels    = None,
+        box             = input_box[None, :],
+        multimask_output=False,
+    )
+    show_masks(image, masks, scores, box_coords=input_box)
+    masks_list.append(masks[0])
+
+combined_mask = get_combine_masks(masks_list, margin=0)
+mask_path = os.path.join(IMAGE_FOLDER,f"{IMAGE_NAME_wo_ext}_mask.png")
+combined_mask.save(mask_path)
+combined_mask
+
+#%% get one mask using detected boxes
 index = 0
 image           = load_image(IMAGE_PATH)
 display(image)
@@ -100,10 +124,13 @@ masks, scores, _ = sam2_predictor.predict(
 )
 show_masks(image, masks, scores, box_coords=input_box)
 
-pil_mask = get_mask_img(masks[index])
+# pil_mask = get_mask_img(masks[index])
+pil_mask = get_mask_img_margin(masks[index], margin=10)
 mask_path = os.path.join(IMAGE_FOLDER,f"{IMAGE_NAME_wo_ext}_mask.png")
 pil_mask.save(mask_path)
 pil_mask
+
+
 
 #%%
 # def get_mask_img_test(mask:np.ndarray):
