@@ -22,3 +22,7 @@ If you want to run some of the code from this repo, to avoid messing up your Pyt
 
 1. Florence2, see code in folder: `segmentations/florence2`
 2. GroundingDino: see code in folder: `segatmentations/grounding_dino`
+
+### Image Editing
+
+1. Remove Object & Waters from image - LaMa Inpaint: `ai_models_eval/lama_inpaint`
