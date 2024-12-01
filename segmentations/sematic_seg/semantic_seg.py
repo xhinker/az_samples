@@ -54,7 +54,7 @@ sam2_predictor = load_sam2_model(
 
 #%% get boxes using dino 
 import os
-IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_s1.png"
+IMAGE_PATH          = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2.png"
 IMAGE_FOLDER        = os.path.dirname(IMAGE_PATH)
 IMAGE_NAME          = os.path.basename(IMAGE_PATH)
 IMAGE_NAME_wo_ext,_   = os.path.splitext(IMAGE_NAME)
@@ -103,7 +103,7 @@ for i,box in enumerate(xyxy_boxes):
     show_masks(image, masks, scores, box_coords=input_box)
     masks_list.append(masks[0])
 
-combined_mask = get_combine_masks(masks_list, margin=0)
+combined_mask = get_combine_masks(masks_list, margin=10)
 mask_path = os.path.join(IMAGE_FOLDER,f"{IMAGE_NAME_wo_ext}_mask.png")
 combined_mask.save(mask_path)
 combined_mask

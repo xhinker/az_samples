@@ -13,12 +13,12 @@ If you want to run some of the code from this repo, to avoid messing up your Pyt
 
 ### Diffusion related model
 
-1. Stable Diffusion 1.5, see folder: `diffusion_models/sd15`
-2. Stable Diffusion XL, see folder: `diffusion_models/sdxl`
-3. Stable Diffusion SD35, see folder: `diffusion_models/sd35`
-4. Flux.1, see folder: `diffusion_models/flux`
+1. Stable Diffusion 1.5, see code in folder: `diffusion_models/sd15`
+2. Stable Diffusion XL, see code in folder: `diffusion_models/sdxl`
+3. Stable Diffusion SD35, see code in folder: `diffusion_models/sd35`
+4. Flux.1, see code in folder: `diffusion_models/flux`
 
 ### Segmentation
 
-1. Florence2, see folder: `segmentations/florence2`
-2. GroundingDino: `segatmentations/grounding_dino`
+1. Florence2, see code in folder: `segmentations/florence2`
+2. GroundingDino: see code in folder: `segatmentations/grounding_dino`
