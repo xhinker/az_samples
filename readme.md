@@ -1,8 +1,13 @@
 # Andrew Zhu's Sample Code
 
+<a href="https://www.amazon.com/Using-Stable-Diffusion-Python-Generation/dp/1835086373" target="_blank"><img src="https://m.media-amazon.com/images/I/81qJBJlgGEL._SL1500_.jpg" alt="Using Stable Diffusion with Python" height="256px" align="right"></a>
+
 Previously, I put my sample code in one of my private repository, the repo becomes like a chaos and impossible to manage, and becomes unreadable (not mention execution it again) gradually. 
 
 So that decide to setup this public repository to host all of my daily sample code with better structure and comments. 
+
+More sample code in my book. 
+
 
 ## Setup Environment
 
