@@ -4,9 +4,6 @@ Update diffusers to the newest version
 
 Install azailib
 `pip install -U git+https://github.com/xhinker/azailib.git`
-
-This inpaint model could be the best so far. 
-Working well with bright color, but not dark color, if the source object color is black, need to hight light it.
 '''
 
 #%%
