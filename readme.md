@@ -8,6 +8,18 @@ So that decide to setup this public repository to host all of my daily sample co
 
 If you want to run some of the code from this repo, to avoid messing up your Python runtime, you'd better setup a virtual python environment and install the packages list in `requirements.txt` file.
 
+Install `azailib` tool
+
+```sh
+pip install -U git+https://github.com/xhinker/azailib.git@main
+```
+
+Install `sd_embed` for unlimited size Diffusion prompt embedding generation
+
+```sh
+pip install -U git+https://github.com/xhinker/sd_embed.git@main
+```
+
 
 ## What sample code inside of this rep
 
