@@ -8,7 +8,6 @@ So that decide to setup this public repository to host all of my daily sample co
 
 More sample code in my book. 
 
-
 ## Setup Environment
 
 If you want to run some of the code from this repo, to avoid messing up your Python runtime, you'd better setup a virtual python environment and install the packages list in `requirements.txt` file.

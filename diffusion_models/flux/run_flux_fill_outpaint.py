@@ -20,8 +20,11 @@ pipe = load_flux1_fill_8bit_pipe(
 )
 
 #%%
-image_path  = 'source_images/face.png'
-prompt      = "sunny day, with flowers in the background"
+#image_path  = 'source_images/face.png'
+#prompt      = "sunny day, with flowers in the background"
+
+image_path  = 'https://preview.redd.it/flux-dev-outpainting-v0-9ehgpg8yzg4e1.jpg?width=1022&format=pjpg&auto=webp&s=deaf195c8894a897c007618aebb47f2c02e53ed5'
+prompt      = ""
 from azailib.image_tools import generate_outpaint_image_mask
 
 outpaint_pixel = 400
@@ -35,6 +38,7 @@ image, mask = generate_outpaint_image_mask(
 )
 
 (w,h) = mask.size
+print(w, h)
 
 display(image)
 display(mask)
