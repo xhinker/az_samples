@@ -20,13 +20,18 @@ pipe = load_flux1_fill_8bit_pipe(
 )
 
 #%%
-image_path  = 'source_images/outpaint_image.png'
-mask_path   = 'source_images/outpaint_image_mask.png'
-prompt      = ""
+image_path  = 'source_images/face.png'
+prompt      = "sunny day, with flowers in the background"
 from azailib.image_tools import generate_outpaint_image_mask
 
+outpaint_pixel = 400
 image, mask = generate_outpaint_image_mask(
-    input_image = image_path
+    input_image             = image_path
+    , top_expand            = outpaint_pixel
+    , right_expand          = outpaint_pixel
+    , bottom_expand         = outpaint_pixel
+    , left_expand           = outpaint_pixel
+    , original_image_scale  = 0.6
 )
 
 (w,h) = mask.size
