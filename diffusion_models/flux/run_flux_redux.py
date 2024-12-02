@@ -19,7 +19,7 @@ from diffusers.utils import load_image
 base_model_path         = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-dev_main"
 transformer_model_path  = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_models/flux_checkpoints/fluxescoreDev_asian_v10Fp16"
 redux_model_path        = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-Redux-dev_main"
-device = "cuda:0"
+device                  = "cuda:0"
 
 transformer = FluxTransformer2DModel.from_pretrained(
     transformer_model_path
@@ -47,7 +47,7 @@ pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
 ).to(device)
 
 #%%
-image_path = "/home/andrewzhu/storage_8t_4/sd_input_output/2023-08-21/00083-3097990354.png/home/andrewzhu/storage_8t_4/sd_input_output/2023-08-21/00083-3097990354.png"
+image_path = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/robot.png"
 image               = load_image(image_path)
 display(image)
 
