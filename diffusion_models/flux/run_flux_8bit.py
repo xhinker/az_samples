@@ -5,7 +5,7 @@ from azailib.sd_pipe_loaders import load_flux1_8bit_pipe
 model_path  = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-dev_main"
 pipe        = load_flux1_8bit_pipe(
     checkpoint_path_or_id   = model_path
-    , pipe_device           = "cuda:0"
+    , pipe_gpu_id           = 0
 )
 
 #%%
