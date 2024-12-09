@@ -124,8 +124,14 @@ model.to(device)
 # image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark.png"
 # mask_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark_mask.png"
 
-image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2.png"
-mask_path  = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_mask.png"
+# image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2.png"
+# mask_path  = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/image_w_watermark2_mask.png"
+
+# image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/jeans.png"
+# mask_path  = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/output_images/jeans_mask.png"
+
+image_path      = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/lama_inpaint/test_images/image_w_watermark.png"
+mask_path       = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/lama_inpaint/test_images/image_w_watermark_mask.png"
 
 batch = load_image_mask_from_uri(image_uri=image_path, mask_uri=mask_path)
 
@@ -148,6 +154,11 @@ if unpad_to_size is not None:
 cur_res = np.clip(cur_res * 255, 0, 255).astype('uint8')
 cur_res = cv2.cvtColor(cur_res, cv2.COLOR_RGB2BGR)
 
-output_file_name = "output/result.png"
-cv2.imwrite(output_file_name, cur_res)
+# output_file_name = "output/result.png"
+# cv2.imwrite(output_file_name, cur_res)
+
+#%%
+from azailib.image_tools import convert_cv2_to_pil_img
+output_img = convert_cv2_to_pil_img(cur_res)
+output_img
     

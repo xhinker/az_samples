@@ -15,7 +15,6 @@ device      = "cuda:0"
 pipe = StableDiffusionXLInpaintPipeline.from_pretrained(
     model_path
     , torch_dtype       = torch.float16
-    #, variant           = "fp16"
     , use_safetensors   = True
 )
 pipe.to(device)

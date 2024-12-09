@@ -1,7 +1,7 @@
 #%%
-from azailib.image_model_tools import (
+from azailib.image_model_pipes import (
     GroundingDinoPipeline
-    , SAMModelPiple
+    , SAMModelPipe
 )
 
 groundingdino_model_path = "/home/andrewzhu/storage_1t_1/github_repos/GroundingDINO/weights/groundingdino_swint_ogc.pth"
@@ -12,13 +12,13 @@ dino_pipe = GroundingDinoPipeline(
 )
 
 # load SAM2 pipe
-sam2_pipe = SAMModelPiple(
+sam2_pipe = SAMModelPipe(
     checkpoint_path_or_id = sam2_checkpoint
 )
 
 #%%
 image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/jeans.png"
-target_prompt = "Lower body covered by pant or jeans"
+target_prompt = "black shirt"
 
 anotated_img, boxes = dino_pipe.predict(
     image_path = image_path
@@ -32,5 +32,9 @@ masks = sam2_pipe.get_masks(
     image_or_path = image_path
     , xyxy_boxes = boxes
     , show_middle_masks = True
+    , dilate_margin = 10
 ) 
 masks
+
+#%%
+masks.save("output_images/jeans_mask.png")

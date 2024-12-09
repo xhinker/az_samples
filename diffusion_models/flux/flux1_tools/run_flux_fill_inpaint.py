@@ -29,7 +29,7 @@ pipe = load_flux1_fill_8bit_pipe(
 image_path  = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/woman_hat.png'
 mask_path   = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/segmentations/sematic_seg/source_images/woman_hat_mask.png'
 prompt      = """\
-20yo korean girl face
+35 year old korean girl face
 """
 
 # Load image and mask
