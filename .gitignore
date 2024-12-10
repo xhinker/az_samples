@@ -2,5 +2,4 @@
 *_venv*
 *.zip
 *.tar
-applications/remove_watermark
 *_private*
