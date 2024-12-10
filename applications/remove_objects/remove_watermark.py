@@ -38,9 +38,9 @@ print(boxes)
 #%%
 masks = sam2_pipe.get_masks(
     image_or_path = image_path
-    , xyxy_boxes = boxes
+    , xyxy_boxes        = boxes
     , show_middle_masks = True
-    , dilate_margin = 35
+    , dilate_margin     = 35
 ) 
 masks_path = "mask.png"
 masks.save(masks_path)
@@ -48,7 +48,7 @@ masks
 
 #%%
 output_img = lama_pipe.predict(
-    input_img_path=image_path
-    , input_mask_path=masks_path
+    input_img_path      = image_path
+    , input_mask_path   = masks_path
 )
 output_img
