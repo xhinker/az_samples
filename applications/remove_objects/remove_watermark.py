@@ -7,7 +7,7 @@ from azailib.image_model_pipes import (
 
 groundingdino_model_path    = "/home/andrewzhu/storage_1t_1/github_repos/GroundingDINO/weights/groundingdino_swint_ogc.pth"
 sam2_checkpoint             = "/home/andrewzhu/storage_1t_1/github_repos/sam2/checkpoints/sam2.1_hiera_large.pt"
-checkpoint_path             = "/home/andrewzhu/storage_1t_1/github_repos/lama/big-lama/models/best.ckpt"
+lama_checkpoint_path        = "/home/andrewzhu/storage_1t_1/github_repos/lama/big-lama/models/best.ckpt"
 
 # load dino pipe
 dino_pipe = GroundingDinoPipeline(
@@ -20,7 +20,7 @@ sam2_pipe = SAMModelPipe(
 )
 
 # load LAMA inpaint
-lama_pipe = LAMAInpaintPipe(checkpoint_path=checkpoint_path)
+lama_pipe = LAMAInpaintPipe(checkpoint_path=lama_checkpoint_path)
 
 #%%
 image_path = "images_with_watermark/image_2.png"
