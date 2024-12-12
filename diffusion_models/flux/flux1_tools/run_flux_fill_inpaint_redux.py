@@ -5,8 +5,7 @@ Update diffusers to the newest version
 Install azailib
 `pip install -U git+https://github.com/xhinker/azailib.git`
 
-This inpaint model could be the best so far. 
-Working well with bright color, but not dark color, if the source object color is black, need to hight light it.
+Combine fill and redux, we can easily build a cloth transfer application. 
 '''
 
 #%%
@@ -58,33 +57,31 @@ pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
 ).to(device)
 
 #%% generate boxes for base image
-image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model4.png'
-# image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress6.png"
+# image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model3.png'
+# image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress6.png'
+image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/model/model_1.png'
+
+
+#%%
+target_words = [
+    "shirt"
+    , "arms"
+    , "shoulder"
+    , "breasts"
+]
+
 all_boxes = []
-
-#%%
-# anotated_img, boxes = dino_pipe.predict(
-#     image_path = image_path
-#     , prompt = "arms" 
-#     , box_threshold = 0.3
-# )
-# display(anotated_img)
-# #print(boxes)
-
-# all_boxes = [*all_boxes, *boxes]
-# print(all_boxes)
-
-#%%
-anotated_img, boxes = dino_pipe.predict(
-    image_path = image_path
-    , prompt = "cloth" 
-    , box_threshold = 0.3
-)
-display(anotated_img)
-#print(boxes)
-
-all_boxes = [*all_boxes, *boxes]
+for prompt in target_words:
+    anotated_img, boxes = dino_pipe.predict(
+        image_path = image_path
+        , prompt = prompt
+        , box_threshold = 0.3
+    )
+    display(anotated_img)
+    print(boxes)
+    all_boxes = [*all_boxes, *boxes]
 print(all_boxes)
+
 
 #%% generate mask
 mask = sam2_pipe.get_masks(
@@ -112,20 +109,19 @@ mask = resize_img(image_or_path=mask_path,width=w, height=h)
 display(mask)
 
 #%% load dress image and remove background
-dress_image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress9.png"
-# dress_image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model3.png'
+dress_image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/garment/048769_1.jpg'
 
-dress_image = rembg_pipe.remove_background(
-    image_or_path   = dress_image_path
-    , width         = w
-    , height        = h
-)
-
-# dress_image      = resize_img(
+# dress_image = rembg_pipe.remove_background(
 #     image_or_path   = dress_image_path
 #     , width         = w
 #     , height        = h
 # )
+
+dress_image      = resize_img(
+    image_or_path   = dress_image_path
+    , width         = w
+    , height        = h
+)
 
 resized_dress_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress_temp.png"
 dress_image.save(resized_dress_path)
@@ -187,7 +183,6 @@ ext_mask = extend_mask_left(
 )
 display(ext_mask)
 
-#%%
 new_w,new_h = concate_image.size
 image = pipe(
     image                   = concate_image     #base_image
