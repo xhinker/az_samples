@@ -23,14 +23,14 @@ sam2_pipe = SAMModelPipe(
 lama_pipe = LAMAInpaintPipe(checkpoint_path=lama_checkpoint_path)
 
 #%%
-image_path = "images_with_watermark/image_2.png"
-target_prompt = "boat, or boat shadow, or watermark"
+image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/long_dress10_watermark.png"
+target_prompt = "watermark"
 
 anotated_img, boxes = dino_pipe.predict(
     image_path          = image_path
     , prompt            = target_prompt
-    , box_threshold     = 0.2
-    , text_threshold    = 0.3
+    , box_threshold     = 0.26
+    , text_threshold    = 0.26
 )
 display(anotated_img)
 print(boxes)
@@ -40,7 +40,7 @@ masks = sam2_pipe.get_masks(
     image_or_path = image_path
     , xyxy_boxes        = boxes
     , show_middle_masks = True
-    , dilate_margin     = 35
+    , dilate_margin     = 10
 ) 
 masks_path = "mask.png"
 masks.save(masks_path)
@@ -51,4 +51,5 @@ output_img = lama_pipe.predict(
     input_img_path      = image_path
     , input_mask_path   = masks_path
 )
-output_img
+output_img.save("/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/long_dress10_no_watermark.png")
+display(output_img)

@@ -26,12 +26,24 @@ from azailib.image_tools import (
     , extract_object_on_white_background
     , extract_objects_using_xyxy_boxes
 )
+from azailib.image_model_pipes import OOTDPipe
 
 flux_model_path             = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-Fill-dev_main"
 groundingdino_model_path    = "/home/andrewzhu/storage_1t_1/github_repos/GroundingDINO/weights/groundingdino_swint_ogc.pth"
 sam2_checkpoint             = "/home/andrewzhu/storage_1t_1/github_repos/sam2/checkpoints/sam2.1_hiera_large.pt"
 redux_model_path            = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-Redux-dev_main"
 device                      = "cuda:0"
+
+body_pose_checkpoint_path           = "/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/checkpoints/openpose/ckpts/body_pose_model.pth"
+humanparsing_atr_checkpoint_path    = "/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/checkpoints/humanparsing/parsing_atr.onnx"
+humanparsing_lip_checkpoint_path    = "/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/checkpoints/humanparsing/parsing_lip.onnx"
+
+ootd_pipe = OOTDPipe(
+    body_pose_checkpoint_path           = body_pose_checkpoint_path
+    , humanparsing_atr_checkpoint_path  = humanparsing_atr_checkpoint_path
+    , humanparsing_lip_checkpoint_path  = humanparsing_lip_checkpoint_path
+    , gpu_id=1
+)
 
 #%%
 rembg_pipe = RembgPipe()
@@ -57,48 +69,59 @@ pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
 ).to(device)
 
 #%% generate boxes for base image
-# image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model3.png'
-# image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress6.png'
-image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/model/model_1.png'
+# image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/image-4.png'
+image_path = '/home/andrewzhu/storage_8t_4/sd_input_output/20231206/fudukiMix_v15_0.5_0.2_0.5_korean_upscale_1.75_1346.png'
+load_image(image_path)
 
-
-#%%
-target_words = [
-    "shirt"
-    , "arms"
-    , "shoulder"
-    , "breasts"
-]
-
-all_boxes = []
-for prompt in target_words:
-    anotated_img, boxes = dino_pipe.predict(
-        image_path = image_path
-        , prompt = prompt
-        , box_threshold = 0.3
-    )
-    display(anotated_img)
-    print(boxes)
-    all_boxes = [*all_boxes, *boxes]
-print(all_boxes)
-
-
-#%% generate mask
-mask = sam2_pipe.get_masks(
-    image_or_path       = image_path
-    , xyxy_boxes        = all_boxes
-    , show_middle_masks = True
-    , dilate_margin     = 10
-) 
+#%% generate mask using ootd
+mask = ootd_pipe.get_mask(
+    image_or_path   = image_path
+    # , body_position = "lower_body_w_shoe"  #"dresses"
+    # , body_position = "dresses_w_shoe"  #"dresses"
+    # , body_position = "upper_body"  #"dresses"
+    # , body_position = "dresses"  #"dresses"
+    , body_position = "whole_body_except_head"  #"dresses"
+    , dilate_margin = 1
+)
 mask_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model_mask.png"
 mask.save(mask_path)
 mask
+
+#%% generate mask using GroundingDino and sam
+# target_words = [
+#     "shirt"
+#     , "arms"
+#     , "shoulder"
+# ]
+
+# all_boxes = []
+# for prompt in target_words:
+#     anotated_img, boxes = dino_pipe.predict(
+#         image_path = image_path
+#         , prompt = prompt
+#         , box_threshold = 0.3
+#     )
+#     display(anotated_img)
+#     print(boxes)
+#     all_boxes = [*all_boxes, *boxes]
+# print(all_boxes)
+
+# # generate mask
+# mask = sam2_pipe.get_masks(
+#     image_or_path       = image_path
+#     , xyxy_boxes        = all_boxes
+#     , show_middle_masks = True
+#     , dilate_margin     = 10
+# ) 
+# mask_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model_mask.png"
+# mask.save(mask_path)
+# mask
 
 #%% scale image and mask
 # Load image and mask
 # base_image = load_image(image_path)#.convert("RGB")#.resize(size)
 base_image = scale_img(
-    img_path = image_path
+    img_path        = image_path
     , upscale_times = 0.65
 )
 (w,h) = base_image.size
@@ -109,7 +132,8 @@ mask = resize_img(image_or_path=mask_path,width=w, height=h)
 display(mask)
 
 #%% load dress image and remove background
-dress_image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/garment/048769_1.jpg'
+# dress_image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/long_dress10_no_watermark.png'
+dress_image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/short_dress8.png"
 
 # dress_image = rembg_pipe.remove_background(
 #     image_or_path   = dress_image_path
@@ -117,6 +141,7 @@ dress_image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/e
 #     , height        = h
 # )
 
+# for pure white bg
 dress_image      = resize_img(
     image_or_path   = dress_image_path
     , width         = w
@@ -190,9 +215,9 @@ image = pipe(
     , height                = new_h
     , width                 = new_w
     , guidance_scale        = 30
-    , num_inference_steps   = 30
+    , num_inference_steps   = 40
     , max_sequence_length   = 512
-    , generator             = torch.Generator("cpu").manual_seed(2)
+    , generator             = torch.Generator("cpu").manual_seed(5)
     , **pipe_prior_output
 ).images[0]
 image
