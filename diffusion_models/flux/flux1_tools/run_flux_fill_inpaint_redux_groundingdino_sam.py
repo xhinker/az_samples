@@ -23,8 +23,6 @@ from azailib.image_tools import (
     , scale_img
     , concatenate_images_left_right
     , extend_mask_left
-    , extract_object_on_white_background
-    , extract_objects_using_xyxy_boxes
 )
 from azailib.image_model_pipes import OOTDPipe
 
@@ -119,7 +117,7 @@ mask = resize_img(image_or_path=mask_path,width=w, height=h)
 display(mask)
 
 #%% load dress image and remove background
-dress_image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/pergola4.png"
+dress_image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/pergola6.png"
 
 # dress_image = rembg_pipe.remove_background(
 #     image_or_path   = dress_image_path
@@ -166,7 +164,7 @@ image = pipe(
     , guidance_scale        = 30
     , num_inference_steps   = 30
     , max_sequence_length   = 512
-    , generator             = torch.Generator("cpu").manual_seed(5)
+    , generator             = torch.Generator("cpu").manual_seed(8)
     , **pipe_prior_output
 ).images[0]
 image

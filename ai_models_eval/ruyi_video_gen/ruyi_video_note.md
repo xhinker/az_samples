@@ -1,0 +1,1 @@
+Another video gen repo: https://github.com/IamCreateAI/Ruyi-Models?tab=readme-ov-file#installation-instructions
