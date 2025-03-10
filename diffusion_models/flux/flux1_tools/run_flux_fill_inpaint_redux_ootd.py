@@ -69,8 +69,8 @@ pipe_prior_redux = FluxPriorReduxPipeline.from_pretrained(
 ).to(device)
 
 #%% generate boxes for base image
-# image_path = '/home/andrewzhu/storage_1t_1/github_repos/OOTDiffusion/run/examples/image-4.png'
-image_path = '/home/andrewzhu/storage_8t_4/sd_input_output/20231206/fudukiMix_v15_0.5_0.2_0.5_korean_upscale_1.75_1346.png'
+# image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model3.png'
+image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress6.png'
 load_image(image_path)
 
 #%% generate mask using ootd
@@ -79,8 +79,8 @@ mask = ootd_pipe.get_mask(
     # , body_position = "lower_body_w_shoe"  #"dresses"
     # , body_position = "dresses_w_shoe"  #"dresses"
     # , body_position = "upper_body"  #"dresses"
-    # , body_position = "dresses"  #"dresses"
-    , body_position = "whole_body_except_head"  #"dresses"
+    , body_position = "dresses"  #"dresses"
+    # , body_position = "whole_body_except_head"  #"dresses"
     , dilate_margin = 1
 )
 mask_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model_mask.png"
@@ -122,7 +122,7 @@ mask
 # base_image = load_image(image_path)#.convert("RGB")#.resize(size)
 base_image = scale_img(
     img_path        = image_path
-    , upscale_times = 0.65
+    , upscale_times = 0.4
 )
 (w,h) = base_image.size
 display(base_image)
@@ -132,21 +132,23 @@ mask = resize_img(image_or_path=mask_path,width=w, height=h)
 display(mask)
 
 #%% load dress image and remove background
-# dress_image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/long_dress10_no_watermark.png'
-dress_image_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/local_tests/images/short_dress8.png"
+# dress_image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress6.png'
+dress_image_path = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/model3.png'
 
-# dress_image = rembg_pipe.remove_background(
-#     image_or_path   = dress_image_path
-#     , width         = w
-#     , height        = h
-# )
-
-# for pure white bg
+# just resize
 dress_image      = resize_img(
     image_or_path   = dress_image_path
     , width         = w
     , height        = h
 )
+display(dress_image)
+
+# for pure white bg
+# dress_image = rembg_pipe.remove_background(
+#     image_or_path   = dress_image_path
+#     , width         = w
+#     , height        = h
+# )
 
 resized_dress_path = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/diffusion_models/flux/source_images/dress_temp.png"
 dress_image.save(resized_dress_path)

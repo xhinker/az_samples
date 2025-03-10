@@ -1,0 +1,20 @@
+{
+    "cn_woman_1":{
+        "language":         "cn"
+        , "file_name":      "zero_shot_prompt.wav"
+        , "prompt_text":    "希望你以后能够做的比我还好呦。"
+        , "frequency":      16000
+    }
+    , "cn_woman_2":{
+        "language":         "cn"
+        , "file_name":      "Zh_7_prompt.wav"
+        , "prompt_text":    "今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。"
+        , "frequency":      16000
+    }
+    ,  "cn_male_1":{
+        "language":         "cn"
+        , "file_name":      "9_ZH.wav"
+        , "prompt_text":    "如果能对小事感到感激和满足，那他就是幸福的人。"
+        , "frequency":      16000
+    }
+}

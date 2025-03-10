@@ -20,8 +20,17 @@ optimum-quanto
 git+https://github.com/xhinker/sd_embed.git@main
 git+https://github.com/xhinker/azailib.git@main
 gradio
+modelscope
 
 # required by leffa
 fvcore
 cloudpickle
 av
+
+# required by cosyvoice
+HyperPyYAML         #==1.2.2
+openai-whisper      #==20231117
+inflect             #==7.3.1
+WeTextProcessing    #==1.0.3
+matcha-tts
+pyarrow
