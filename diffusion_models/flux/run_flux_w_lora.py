@@ -4,7 +4,6 @@ from diffusers import DiffusionPipeline, FluxTransformer2DModel
 from torchao.quantization import quantize_, int8_weight_only
 from sd_embed.embedding_funcs import get_weighted_text_embeddings_flux1
 
-#%%
 model_path  = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_hf_models/black-forest-labs/FLUX.1-dev_main"
 gpu_id      = 0
 device      = f"cuda:{gpu_id}"
@@ -15,13 +14,8 @@ transformer = FluxTransformer2DModel.from_pretrained(
     , subfolder = "transformer"
     , torch_dtype = torch.bfloat16
 )
-quantize_(
-    transformer
-    , int8_weight_only()
-    , device = device
-)
 
-quantize_(transformer, int8_weight_only())
+# quantize_(transformer, int8_weight_only())
 
 pipe = DiffusionPipeline.from_pretrained(
     model_path
@@ -29,11 +23,20 @@ pipe = DiffusionPipeline.from_pretrained(
     , torch_dtype = torch.bfloat16
 )
 
-pipe.enable_model_cpu_offload(gpu_id=gpu_id)
-
 #%% load lora 
-lora_path = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_models/flux_lora/UltraRealPhoto.safetensors"
-pipe.load_lora_weights(lora_path)
+# lora_path = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_models/flux_lora/UltraRealPhoto.safetensors"
+lora_path_1     = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_models/flux_lora/AsirAsianPhotographyflux.safetensors"
+lora_path_2     = "/home/andrewzhu/storage_14t_5/ai_models_all/sd_models/flux_lora/nwsj_flux0924.safetensors"
+pipe.load_lora_weights(lora_path_1, adapter_name="asian")
+pipe.load_lora_weights(lora_path_2, adapter_name="nwsj")
+
+quantize_(
+    transformer
+    , int8_weight_only()
+    , device = device
+)
+
+pipe.enable_model_cpu_offload(gpu_id=gpu_id)
 
 #%%
 prompt = """
@@ -52,6 +55,7 @@ prompt_embeds, pooled_prompt_embeds = get_weighted_text_embeddings_flux1(
 )
 
 #%%
+pipe.set_adapters(["asian", "nwsj"], adapter_weights=[0.3, 0.3])
 seed = 11
 for i in range(seed, seed + 1):
     print(i)
@@ -60,10 +64,10 @@ for i in range(seed, seed + 1):
         , pooled_prompt_embeds      = pooled_prompt_embeds
         # prompt = prompt # you can also provide the prompt here directly
         , width                     = 1024#1680
-        , height                    = 1680#1024
+        , height                    = 1024#1024
         , num_inference_steps       = 24
         , generator                 = torch.Generator().manual_seed(i)
         , guidance_scale            = 3.5
-        , joint_attention_kwargs    = {"scale": 0.0}
+        #, joint_attention_kwargs    = {"scale": 0.0}
     ).images[0]
     display(image)

@@ -1,10 +1,9 @@
--f https://download.pytorch.org/whl/cu118
-torch
+torch==2.6.0+cu124
 torchvision
 torchaudio
 
 accelerate
-bitsandbytes
+
 protobuf
 transformers
 diffusers
@@ -34,3 +33,4 @@ inflect             #==7.3.1
 WeTextProcessing    #==1.0.3
 matcha-tts
 pyarrow
+torchao
