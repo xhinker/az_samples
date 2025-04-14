@@ -34,3 +34,7 @@ WeTextProcessing    #==1.0.3
 matcha-tts
 pyarrow
 torchao
+
+optimum
+auto-gptq
+bitsandbytes

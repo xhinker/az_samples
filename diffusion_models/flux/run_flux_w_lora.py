@@ -40,7 +40,7 @@ pipe.enable_model_cpu_offload(gpu_id=gpu_id)
 
 #%%
 prompt = """
-Fashion portrait photo of thin young caucasian woman, 25yo, 
+Fashion portrait photo of thin young woman, 25yo, 
 with light green almond-shaped eyes and narrow lips with an arrogant attitude. 
 She has tousled auburn emo scene hair and emo makeup featuring shades of white and mascara with glossy lipstick, 
 wearing sleeveless faux leather graphic tee in combination with a beaded necklace. 
@@ -56,7 +56,7 @@ prompt_embeds, pooled_prompt_embeds = get_weighted_text_embeddings_flux1(
 
 #%%
 pipe.set_adapters(["asian", "nwsj"], adapter_weights=[0.3, 0.3])
-seed = 11
+seed = 12
 for i in range(seed, seed + 1):
     print(i)
     image = pipe(
