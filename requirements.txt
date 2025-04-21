@@ -38,3 +38,7 @@ torchao
 optimum
 auto-gptq
 bitsandbytes
+
+ftfy
+imageio-ffmpeg
+imageio
