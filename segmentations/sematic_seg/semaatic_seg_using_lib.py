@@ -11,6 +11,7 @@ dino_pipe = GroundingDinoPipeline(
     checkpoint_path_or_id = groundingdino_model_path
 )
 
+#%%
 # load SAM2 pipe
 sam2_pipe = SAMModelPipe(
     checkpoint_path_or_id = sam2_checkpoint

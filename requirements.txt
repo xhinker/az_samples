@@ -1,4 +1,5 @@
-torch==2.6.0+cu124
+#torch==2.4.0+cu118 for py3.10
+#torch==2.6.0+cu124 for py3.11
 torchvision
 torchaudio
 
@@ -15,7 +16,7 @@ matplotlib
 huggingface_hub
 flash_attn
 timm
-optimum-quanto
+optimum-quantof
 git+https://github.com/xhinker/sd_embed.git@main
 git+https://github.com/xhinker/azailib.git@main
 gradio
@@ -42,3 +43,6 @@ bitsandbytes
 ftfy
 imageio-ffmpeg
 imageio
+
+albumentations==0.4.6
+webdataset

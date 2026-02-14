@@ -3,4 +3,11 @@
 *.zip
 *.tar
 *_private*
-.codegpt
+*.codegpt
+*.mp4
+*.pyc
+outputs/
+*.jpg
+*.png
+*.PNG
+*_test*
