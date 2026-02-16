@@ -2,6 +2,21 @@
 
 #%%
 model_type  = "tts_hf_models"
+model_id    = "nvidia/personaplex-7b-v1"
+branch      = "main"
+
+local_dir   = f"/mnt/data_2t/az_git_folder/az_samples/ai_models_eval/voice_models/personaplex/models/{model_type}/{model_id}_{branch}"
+
+cmd_template = rf"""
+source /mnt/data_2t/az_git_folder/az_samples/azsample_venv_p312/bin/activate 
+huggingface-cli download {model_id} --revision {branch} --local-dir {local_dir}
+"""
+
+print(cmd_template)
+
+
+#%%
+model_type  = "tts_hf_models"
 model_id    = "microsoft/VibeVoice-1.5B"
 branch      = "main"
 
