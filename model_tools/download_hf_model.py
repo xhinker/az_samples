@@ -1,5 +1,20 @@
 # pip install huggingface_hub
 
+
+#%%
+model_type  = "tts_hf_models"
+model_id    = "OpenMOSS-Team/MOSS-TTS-Local-Transformer"
+branch      = "main"
+
+local_dir   = f"/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/moss-tts/models/{model_type}/{model_id}_{branch}"
+
+cmd_template = rf"""
+source /home/andrewzhu/storage_1t_1/az_git_folder/az_samples/samplecode_venv_p311/bin/activate
+python -m huggingface_hub.cli.hf download {model_id} --revision {branch} --local-dir {local_dir}
+"""
+
+print(cmd_template)
+
 #%%
 model_type  = "tts_hf_models"
 model_id    = "nvidia/personaplex-7b-v1"
