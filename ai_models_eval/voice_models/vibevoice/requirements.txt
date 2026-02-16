@@ -1,0 +1,5 @@
+torch>=2.2.0
+torchaudio>=2.2.0
+transformers>=4.57.0
+accelerate>=0.34.0
+soundfile>=0.12.1
