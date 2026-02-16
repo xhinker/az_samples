@@ -11,3 +11,6 @@ outputs/
 *.png
 *.PNG
 *_test*
+models/
+*.wav
+vllm-omni/

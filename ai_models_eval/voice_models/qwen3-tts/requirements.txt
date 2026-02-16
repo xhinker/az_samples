@@ -1,0 +1,3 @@
+flash-attn==2.5.8.post1
+qwen-tts
+ipywidgets
