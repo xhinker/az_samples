@@ -68,6 +68,9 @@ OUTPUTS_DIR = BASE_DIR / "outputs"
 UPLOADS_DIR = BASE_DIR / "uploads"
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 SAMPLE_RATE = 24000
+REFERENCE_MAX_SECONDS = 6.0
+REFERENCE_TOKENS_PER_SECOND = 12.5
+REFERENCE_MAX_FRAMES = max(1, int(REFERENCE_MAX_SECONDS * REFERENCE_TOKENS_PER_SECOND))
 
 
 def _version_tuple(version: str) -> tuple[int, int, int]:
@@ -182,6 +185,26 @@ def _extract_codec_codes(encode_result):
     return codes
 
 
+def _normalize_prompt_tokens(tokens: np.ndarray | torch.Tensor, channels: int = 16) -> np.ndarray:
+    arr = np.asarray(tokens)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D prompt tokens, got shape {arr.shape}")
+
+    # Accept [channels, T] or [T, channels], and reduce to the expected RVQ channels.
+    if arr.shape[0] == channels:
+        arr = arr.T
+    elif arr.shape[1] == channels:
+        pass
+    elif arr.shape[0] > channels and arr.shape[1] != channels:
+        arr = arr[:channels, :].T
+    elif arr.shape[1] > channels and arr.shape[0] != channels:
+        arr = arr[:, :channels]
+
+    if arr.shape[1] != channels:
+        raise ValueError(f"Expected {channels} channels after normalization, got shape {arr.shape}")
+    return arr.astype(np.int64, copy=False)
+
+
 class RealtimeTTSRuntime:
     def __init__(self, model_path: Path, codec_path: Path, rt_pkg_path: Path):
         self.model_path = model_path
@@ -230,7 +253,7 @@ class RealtimeTTSRuntime:
             raise FileNotFoundError(f"Reference audio not found: {file_name}")
         return candidate
 
-    def _encode_reference_audio_tokens(self, audio_path: Path, chunk_duration: float = 0.24) -> np.ndarray:
+    def _encode_reference_audio_tokens(self, audio_path: Path) -> np.ndarray:
         try:
             import torchaudio
         except Exception as exc:
@@ -246,12 +269,20 @@ class RealtimeTTSRuntime:
 
         wav = wav.to(self.device)
         with torch.inference_mode():
-            encode_result = self.codec.encode(wav, chunk_duration=chunk_duration)
+            # Reference prompt is timbre conditioning; do not use tiny streaming chunks here.
+            encode_result = self.codec.encode(wav)
         codes = _extract_codec_codes(encode_result)
 
         if isinstance(codes, torch.Tensor):
-            return codes.detach().cpu().numpy()
-        return np.asarray(codes)
+            codes = codes.detach().cpu().numpy()
+        else:
+            codes = np.asarray(codes)
+
+        prompt_tokens = _normalize_prompt_tokens(codes, channels=self.processor.channels)
+        # Keep only a short timbre window to avoid content-copying from long reference speech.
+        if prompt_tokens.shape[0] > REFERENCE_MAX_FRAMES:
+            prompt_tokens = prompt_tokens[:REFERENCE_MAX_FRAMES]
+        return prompt_tokens
 
     async def ensure_loaded(self) -> None:
         if self._ready:
@@ -370,7 +401,7 @@ class RealtimeTTSRuntime:
 
             prompt_tokens = None
             if reference_audio_path is not None:
-                prompt_tokens = self._encode_reference_audio_tokens(reference_audio_path, chunk_duration=0.24)
+                prompt_tokens = self._encode_reference_audio_tokens(reference_audio_path)
             turn_input_ids = _build_text_only_turn_input(
                 self.processor,
                 user_text=user_text,
