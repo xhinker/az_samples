@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MOSS-TTS Realtime Stream</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 24px; color: #222; }
+    .panel { max-width: 840px; margin: 0 auto; }
+    textarea { width: 100%; min-height: 180px; padding: 12px; box-sizing: border-box; font-size: 15px; }
+    .row { display: flex; gap: 10px; margin-top: 12px; }
+    button { padding: 10px 14px; font-size: 14px; cursor: pointer; }
+    input[type=number], input[type=text] { padding: 8px; width: 140px; }
+    .status { margin-top: 12px; font-size: 13px; color: #444; white-space: pre-wrap; }
+    .muted { color: #666; font-size: 12px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h2>MOSS-TTS Realtime (AIOHTTP)</h2>
+    <p class="muted">Enter text and click Stream. Audio plays progressively as chunks arrive.</p>
+
+    <textarea id="text" placeholder="Type text to synthesize...">Welcome to MOSS TTS Realtime. This demo streams generated speech chunks to the browser in real time.</textarea>
+
+    <div class="row">
+      <input id="chunkTokens" type="number" min="1" value="6" title="text token chunk size" />
+      <button id="startBtn">Stream</button>
+      <button id="stopBtn">Stop</button>
+    </div>
+
+    <div id="status" class="status">Idle.</div>
+  </div>
+
+<script>
+(() => {
+  const textEl = document.getElementById('text');
+  const chunkTokensEl = document.getElementById('chunkTokens');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const statusEl = document.getElementById('status');
+
+  let ws = null;
+  let audioCtx = null;
+  let nextTime = 0;
+  let streamPrimed = false;
+
+  function setStatus(msg) {
+    statusEl.textContent = msg;
+  }
+
+  function b64ToFloat32(base64) {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Float32Array(bytes.buffer);
+  }
+
+  async function ensureAudio(sampleRate) {
+    if (!audioCtx || audioCtx.sampleRate !== sampleRate) {
+      if (audioCtx) {
+        await audioCtx.close();
+      }
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+      nextTime = audioCtx.currentTime;
+    }
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+  }
+
+  async function playChunk(samples, sampleRate) {
+    await ensureAudio(sampleRate);
+
+    const buffer = audioCtx.createBuffer(1, samples.length, sampleRate);
+    buffer.copyToChannel(samples, 0);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+    if (!streamPrimed) {
+      // One-time startup cushion to absorb initial websocket jitter.
+      nextTime = now + 0.08;
+      streamPrimed = true;
+    } else if (nextTime < now) {
+      // If underrun happens, catch up immediately without inserting extra silence.
+      nextTime = now;
+    }
+
+    const startAt = nextTime;
+    source.start(startAt);
+    nextTime = startAt + buffer.duration;
+  }
+
+  function closeSocket() {
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+  }
+
+  startBtn.addEventListener('click', async () => {
+    const text = textEl.value.trim();
+    if (!text) {
+      setStatus('Please provide text.');
+      return;
+    }
+
+    closeSocket();
+    streamPrimed = false;
+    nextTime = 0;
+    setStatus('Connecting...');
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+    ws.onopen = () => {
+      setStatus('Streaming...');
+      const payload = {
+        text,
+        chunk_tokens: Number(chunkTokensEl.value || 6),
+      };
+      ws.send(JSON.stringify(payload));
+    };
+
+    ws.onmessage = async (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'audio_chunk') {
+          const samples = b64ToFloat32(msg.pcm_f32);
+          await playChunk(samples, msg.sample_rate);
+          setStatus(`Streaming chunk #${msg.index}`);
+          return;
+        }
+        if (msg.type === 'done') {
+          if (msg.saved_wav) {
+            setStatus(`Done. Saved: ${msg.saved_wav}`);
+          } else {
+            setStatus('Done.');
+          }
+          return;
+        }
+        if (msg.type === 'error') {
+          setStatus(`Error: ${msg.message}`);
+          return;
+        }
+        if (msg.type === 'info') {
+          setStatus(msg.message);
+        }
+      } catch (err) {
+        setStatus(`Client parse error: ${String(err)}`);
+      }
+    };
+
+    ws.onerror = () => {
+      setStatus('WebSocket error.');
+    };
+
+    ws.onclose = () => {
+      ws = null;
+    };
+  });
+
+  stopBtn.addEventListener('click', () => {
+    closeSocket();
+    streamPrimed = false;
+    nextTime = 0;
+    setStatus('Stopped.');
+  });
+})();
+</script>
+</body>
+</html>
