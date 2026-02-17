@@ -417,11 +417,11 @@ class RealtimeTTSRuntime:
                 device=self.device,
             )
 
-            text_tokens = self.tokenizer.encode(text, add_special_tokens=False)
-            if not text_tokens:
-                raise ValueError("Tokenization produced no tokens.")
-
-            step = max(1, int(chunk_tokens))
+            if not text:
+                raise ValueError("Input text is empty.")
+            # Keep the existing payload key for backward compatibility; here it means
+            # the number of characters per incoming text delta.
+            delta_chars = max(1, int(chunk_tokens))
             codebook_size = int(getattr(self.codec, "codebook_size", 1024))
             audio_eos_token = int(getattr(inferencer, "audio_eos_token", 1026))
 
@@ -452,9 +452,12 @@ class RealtimeTTSRuntime:
                     )
 
                 with self.codec.streaming(batch_size=1):
-                    for start in range(0, len(text_tokens), step):
-                        token_chunk = text_tokens[start : start + step]
-                        audio_frames = session.push_text_tokens(token_chunk)
+                    # Follow the original streaming recipe: feed text deltas to
+                    # session.push_text(), letting the session segment/tokenize text
+                    # with punctuation-aware buffering for better long-form stability.
+                    for start in range(0, len(text), delta_chars):
+                        text_delta = text[start : start + delta_chars]
+                        audio_frames = session.push_text(text_delta)
                         for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
                             await _send_chunk(wav_chunk)
                         await asyncio.sleep(0)
