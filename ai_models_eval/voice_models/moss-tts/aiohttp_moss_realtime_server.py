@@ -143,9 +143,10 @@ INDEX_HTML = """
   const stopBtn = document.getElementById('stopBtn');
   const statusEl = document.getElementById('status');
 
-  let ws = null;
-  let audioCtx = null;
-  let nextTime = 0;
+let ws = null;
+let audioCtx = null;
+let nextTime = 0;
+let streamPrimed = false;
 
   function setStatus(msg) {
     statusEl.textContent = msg;
@@ -174,36 +175,30 @@ INDEX_HTML = """
     }
   }
 
-  async function playChunk(samples, sampleRate) {
-    await ensureAudio(sampleRate);
+async function playChunk(samples, sampleRate) {
+  await ensureAudio(sampleRate);
 
-    const buffer = audioCtx.createBuffer(1, samples.length, sampleRate);
-    buffer.copyToChannel(samples, 0);
+  const buffer = audioCtx.createBuffer(1, samples.length, sampleRate);
+  buffer.copyToChannel(samples, 0);
 
-    const source = audioCtx.createBufferSource();
-    source.buffer = buffer;
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(audioCtx.destination);
 
-    const gain = audioCtx.createGain();
-    source.connect(gain);
-    gain.connect(audioCtx.destination);
-
-    const now = audioCtx.currentTime;
-    if (nextTime < now + 0.12) {
-      nextTime = now + 0.12;
-    }
-
-    const startAt = Math.max(now, nextTime);
-    const endAt = startAt + buffer.duration;
-    const fade = Math.min(0.006, buffer.duration / 4);
-
-    gain.gain.setValueAtTime(0.0, startAt);
-    gain.gain.linearRampToValueAtTime(1.0, startAt + fade);
-    gain.gain.setValueAtTime(1.0, Math.max(startAt + fade, endAt - fade));
-    gain.gain.linearRampToValueAtTime(0.0, endAt);
-
-    source.start(startAt);
-    nextTime = endAt;
+  const now = audioCtx.currentTime;
+  if (!streamPrimed) {
+    // One-time startup cushion to absorb initial websocket jitter.
+    nextTime = now + 0.08;
+    streamPrimed = true;
+  } else if (nextTime < now) {
+    // If underrun happens, catch up immediately without inserting extra silence.
+    nextTime = now;
   }
+
+  const startAt = nextTime;
+  source.start(startAt);
+  nextTime = startAt + buffer.duration;
+}
 
   function closeSocket() {
     if (ws) {
@@ -220,6 +215,8 @@ INDEX_HTML = """
     }
 
     closeSocket();
+    streamPrimed = false;
+    nextTime = 0;
     setStatus('Connecting...');
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -274,6 +271,8 @@ INDEX_HTML = """
 
   stopBtn.addEventListener('click', () => {
     closeSocket();
+    streamPrimed = false;
+    nextTime = 0;
     setStatus('Stopped.');
   });
 })();
