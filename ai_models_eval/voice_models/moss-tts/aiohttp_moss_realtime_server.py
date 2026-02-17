@@ -38,6 +38,7 @@ from typing import Iterator, Optional
 import numpy as np
 import torch
 from aiohttp import WSMsgType, web
+from aiohttp.client_exceptions import ClientConnectionError, ClientConnectionResetError
 from transformers import AutoModel, AutoTokenizer, __version__ as TRANSFORMERS_VERSION
 
 # Disable the problematic cuDNN SDPA path; keep safe fallbacks.
@@ -427,14 +428,17 @@ class RealtimeTTSRuntime:
 
             chunk_index = 0
             out_wav_path = self._new_output_wav_path()
+            client_disconnected = False
 
             with wave.open(str(out_wav_path), "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)
                 wf.setframerate(SAMPLE_RATE)
 
-                async def _send_chunk(wav_chunk: torch.Tensor) -> None:
+                async def _send_chunk(wav_chunk: torch.Tensor) -> bool:
                     nonlocal chunk_index
+                    if ws.closed:
+                        return False
                     audio_f32 = wav_chunk.to(torch.float32).contiguous().numpy().reshape(-1)
                     audio_f32 = np.clip(audio_f32, -1.0, 1.0)
                     pcm16 = (audio_f32 * 32767.0).round().astype(np.int16)
@@ -442,14 +446,26 @@ class RealtimeTTSRuntime:
 
                     chunk_index += 1
                     payload = base64.b64encode(audio_f32.tobytes()).decode("ascii")
-                    await ws.send_json(
-                        {
-                            "type": "audio_chunk",
-                            "index": chunk_index,
-                            "sample_rate": SAMPLE_RATE,
-                            "pcm_f32": payload,
-                        }
-                    )
+                    try:
+                        await ws.send_json(
+                            {
+                                "type": "audio_chunk",
+                                "index": chunk_index,
+                                "sample_rate": SAMPLE_RATE,
+                                "pcm_f32": payload,
+                            }
+                        )
+                        return True
+                    except (
+                        asyncio.CancelledError,
+                        ConnectionResetError,
+                        BrokenPipeError,
+                        ClientConnectionError,
+                        ClientConnectionResetError,
+                        RuntimeError,
+                    ):
+                        # Client disconnected while streaming; stop generation gracefully.
+                        return False
 
                 with self.codec.streaming(batch_size=1):
                     # Follow the original streaming recipe: feed text deltas to
@@ -459,33 +475,54 @@ class RealtimeTTSRuntime:
                         text_delta = text[start : start + delta_chars]
                         audio_frames = session.push_text(text_delta)
                         for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
-                            await _send_chunk(wav_chunk)
+                            if not await _send_chunk(wav_chunk):
+                                client_disconnected = True
+                                break
+                        if client_disconnected:
+                            break
                         await asyncio.sleep(0)
 
-                    audio_frames = session.end_text()
-                    for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
-                        await _send_chunk(wav_chunk)
+                    if not client_disconnected:
+                        audio_frames = session.end_text()
+                        for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
+                            if not await _send_chunk(wav_chunk):
+                                client_disconnected = True
+                                break
 
-                    while True:
+                    while not client_disconnected:
                         audio_frames = session.drain(max_steps=1)
                         if not audio_frames:
                             break
                         for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
-                            await _send_chunk(wav_chunk)
-                        if session.inferencer.is_finished:
+                            if not await _send_chunk(wav_chunk):
+                                client_disconnected = True
+                                break
+                        if client_disconnected or session.inferencer.is_finished:
                             break
                         await asyncio.sleep(0)
 
-                    final_chunk = decoder.flush()
-                    if final_chunk is not None and final_chunk.numel() > 0:
-                        await _send_chunk(final_chunk.detach().cpu())
+                    if not client_disconnected:
+                        final_chunk = decoder.flush()
+                        if final_chunk is not None and final_chunk.numel() > 0:
+                            await _send_chunk(final_chunk.detach().cpu())
 
             try:
                 saved_wav = str(out_wav_path.relative_to(BASE_DIR))
             except ValueError:
                 saved_wav = str(out_wav_path)
 
-            await ws.send_json({"type": "done", "chunks": chunk_index, "saved_wav": saved_wav})
+            if not client_disconnected and not ws.closed:
+                try:
+                    await ws.send_json({"type": "done", "chunks": chunk_index, "saved_wav": saved_wav})
+                except (
+                    asyncio.CancelledError,
+                    ConnectionResetError,
+                    BrokenPipeError,
+                    ClientConnectionError,
+                    ClientConnectionResetError,
+                    RuntimeError,
+                ):
+                    pass
 
 
 async def index_handler(_: web.Request) -> web.Response:
@@ -562,7 +599,17 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(max_msg_size=4 * 1024 * 1024)
     await ws.prepare(request)
 
-    await ws.send_json({"type": "info", "message": "Connected. Send JSON with field 'text'."})
+    try:
+        await ws.send_json({"type": "info", "message": "Connected. Send JSON with field 'text'."})
+    except (
+        asyncio.CancelledError,
+        ConnectionResetError,
+        BrokenPipeError,
+        ClientConnectionError,
+        ClientConnectionResetError,
+        RuntimeError,
+    ):
+        return ws
 
     try:
         async for msg in ws:
@@ -606,10 +653,22 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     max_length=max_length,
                 )
             except Exception as exc:
-                await ws.send_json({"type": "error", "message": str(exc)})
+                if not ws.closed:
+                    try:
+                        await ws.send_json({"type": "error", "message": str(exc)})
+                    except (
+                        asyncio.CancelledError,
+                        ConnectionResetError,
+                        BrokenPipeError,
+                        ClientConnectionError,
+                        ClientConnectionResetError,
+                        RuntimeError,
+                    ):
+                        break
 
     finally:
-        await ws.close()
+        if not ws.closed:
+            await ws.close()
 
     return ws
 
