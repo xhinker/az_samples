@@ -39,4 +39,4 @@ if __name__ == "__main__":
     print(f"Downloaded to: {output_dir}")
 
 
-# python3 ai_models_eval/voice_models/moss-tts/download_model.py tts_hf_models OpenMOSS-Team/MOSS-TTS-Local-Transformer main
+# python3 ./download_model.py tts_hf_models Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice main

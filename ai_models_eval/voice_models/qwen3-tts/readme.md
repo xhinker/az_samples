@@ -5,7 +5,9 @@ This is a project under current qwen3-tts folder is aiming to build a real time 
 2. Streaming the text output from an LLM and talk to user real time
 
 ## TODO
-- [ ] Create an `aiohttp` server under `ai_models_eval/voice_models/qwen3-tts` that hosts a web page and streams realtime audio using local model path `models/tts_hf_models/OpenMOSS-Team/Qwen3-TTS-12Hz-1.7B-CustomVoice_main`. reference the Qwen3-tts repo: `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/moss-tts/repos/MOSS-TTS`
+- [ ] A quick Python sample to use `Qwen3-TTS-12Hz-0.6B-CustomVoice` model.
+
+- [ ] Create an `aiohttp` server under `ai_models_eval/voice_models/qwen3-tts` that hosts a web page and streams realtime audio using local model path `models/tts_hf_models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice_main`. reference the Qwen3-tts repo: `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/moss-tts/repos/MOSS-TTS`
 In the web page, user can:
 1. provide the text
 2. referenced audio
