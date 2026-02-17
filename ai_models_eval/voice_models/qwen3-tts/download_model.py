@@ -40,3 +40,5 @@ if __name__ == "__main__":
 
 
 # python3 ./download_model.py tts_hf_models Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice main
+# python3 ./download_model.py tts_hf_models Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign main
+# python3 ./download_model.py tts_hf_models Qwen/Qwen3-TTS-12Hz-1.7B-Base main
