@@ -277,14 +277,7 @@ INDEX_HTML = """
 
 
 def _resolve_attn_implementation(device: torch.device, dtype: torch.dtype) -> str:
-    if (
-        device.type == "cuda"
-        and importlib.util.find_spec("flash_attn") is not None
-        and dtype in {torch.float16, torch.bfloat16}
-    ):
-        major, _ = torch.cuda.get_device_capability()
-        if major >= 8:
-            return "flash_attention_2"
+    # Prefer SDPA for runtime stability in streaming mode.
     if device.type == "cuda":
         return "sdpa"
     return "eager"
