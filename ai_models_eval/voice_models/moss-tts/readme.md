@@ -13,3 +13,4 @@ This is a project aiming to build a real time tts that can stream text to voice 
 - [x] Split inline UI code from Python server into standalone `realtime_page.html` and serve it from `/`.
 - [x] Fix double-click issue (first click only shows connected message, second click starts stream) by resolving WebSocket lifecycle race in client JS.
 - [x] Fix streaming playback flicker/gap noise in browser by updating chunk scheduling logic (contiguous scheduling, remove per-chunk fade gating that introduced boundary artifacts).
+- [ ] In UI, provide uploading a reference audio for streaming and generation

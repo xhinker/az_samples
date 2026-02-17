@@ -23,6 +23,10 @@
     <textarea id="text" placeholder="Type text to synthesize...">Welcome to MOSS TTS Realtime. This demo streams generated speech chunks to the browser in real time.</textarea>
 
     <div class="row">
+      <input id="referenceAudio" type="file" accept="audio/*" title="optional reference audio" />
+    </div>
+
+    <div class="row">
       <input id="chunkTokens" type="number" min="1" value="6" title="text token chunk size" />
       <button id="startBtn">Stream</button>
       <button id="stopBtn">Stop</button>
@@ -34,6 +38,7 @@
 <script>
 (() => {
   const textEl = document.getElementById('text');
+  const referenceAudioEl = document.getElementById('referenceAudio');
   const chunkTokensEl = document.getElementById('chunkTokens');
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
@@ -103,6 +108,32 @@
     }
   }
 
+  async function uploadReferenceAudio(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const response = await fetch('/upload_reference', {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      let detail = '';
+      try {
+        const data = await response.json();
+        detail = data.message || '';
+      } catch (_err) {
+        detail = await response.text();
+      }
+      throw new Error(detail || `Upload failed (${response.status})`);
+    }
+
+    const data = await response.json();
+    if (!data.reference_audio_id) {
+      throw new Error('Upload succeeded but missing reference_audio_id');
+    }
+    return data.reference_audio_id;
+  }
+
   startBtn.addEventListener('click', async () => {
     const text = textEl.value.trim();
     if (!text) {
@@ -113,6 +144,20 @@
     closeSocket();
     streamPrimed = false;
     nextTime = 0;
+    setStatus('Preparing...');
+
+    let referenceAudioId = null;
+    const referenceFile = referenceAudioEl.files && referenceAudioEl.files[0];
+    if (referenceFile) {
+      try {
+        setStatus('Uploading reference audio...');
+        referenceAudioId = await uploadReferenceAudio(referenceFile);
+      } catch (err) {
+        setStatus(`Upload error: ${String(err)}`);
+        return;
+      }
+    }
+
     setStatus('Connecting...');
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -125,6 +170,9 @@
         text,
         chunk_tokens: Number(chunkTokensEl.value || 6),
       };
+      if (referenceAudioId) {
+        payload.reference_audio_id = referenceAudioId;
+      }
       socket.send(JSON.stringify(payload));
     };
 

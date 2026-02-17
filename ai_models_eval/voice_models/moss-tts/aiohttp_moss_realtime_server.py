@@ -9,6 +9,7 @@ WebSocket client payload:
 {
   "text": "Text to speak",
   "user_text": "Optional user message context",
+  "reference_audio_id": "Optional upload id from /upload_reference",
   "chunk_tokens": 6,
   "temperature": 0.8,
   "top_p": 0.6,
@@ -29,9 +30,10 @@ import importlib.util
 import json
 import os
 import sys
+from uuid import uuid4
 import wave
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 import numpy as np
 import torch
@@ -63,6 +65,8 @@ DEFAULT_CODEC_PATH = (
 DEFAULT_RT_PKG_PATH = BASE_DIR / "repos" / "MOSS-TTS" / "moss_tts_realtime"
 DEFAULT_PAGE_PATH = BASE_DIR / "realtime_page.html"
 OUTPUTS_DIR = BASE_DIR / "outputs"
+UPLOADS_DIR = BASE_DIR / "uploads"
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 SAMPLE_RATE = 24000
 
 
@@ -147,6 +151,37 @@ def _build_text_only_turn_input(processor, user_text: str, prompt_tokens: np.nda
     return np.concatenate([system_prompt, user_prompt], axis=0)
 
 
+def _extract_codec_codes(encode_result):
+    if isinstance(encode_result, dict):
+        if "audio_codes" in encode_result:
+            codes = encode_result["audio_codes"]
+        elif "codes_list" in encode_result and encode_result["codes_list"]:
+            codes = encode_result["codes_list"][0]
+        else:
+            raise ValueError("codec.encode output missing audio codes.")
+    elif isinstance(encode_result, (list, tuple)) and encode_result:
+        codes = encode_result[0]
+    elif hasattr(encode_result, "audio_codes"):
+        codes = getattr(encode_result, "audio_codes")
+    else:
+        codes = encode_result
+
+    if isinstance(codes, np.ndarray):
+        codes = torch.from_numpy(codes)
+
+    if isinstance(codes, torch.Tensor):
+        if codes.dim() == 3:
+            if codes.shape[1] == 1:
+                codes = codes[:, 0, :]
+            elif codes.shape[0] == 1:
+                codes = codes[0]
+            else:
+                raise ValueError(f"Unsupported 3D audio code shape: {tuple(codes.shape)}")
+        if codes.dim() != 2:
+            raise ValueError(f"Expected 2D audio codes, got shape {tuple(codes.shape)}")
+    return codes
+
+
 class RealtimeTTSRuntime:
     def __init__(self, model_path: Path, codec_path: Path, rt_pkg_path: Path):
         self.model_path = model_path
@@ -178,6 +213,45 @@ class RealtimeTTSRuntime:
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         return OUTPUTS_DIR / f"stream_{stamp}.wav"
+
+    def resolve_reference_audio_path(self, reference_audio_id: Optional[str]) -> Optional[Path]:
+        if not reference_audio_id:
+            return None
+
+        file_name = Path(str(reference_audio_id)).name
+        if not file_name:
+            raise ValueError("Invalid reference_audio_id.")
+
+        uploads_root = UPLOADS_DIR.resolve()
+        candidate = (UPLOADS_DIR / file_name).resolve()
+        if candidate.parent != uploads_root:
+            raise ValueError("Invalid reference_audio_id path.")
+        if not candidate.exists():
+            raise FileNotFoundError(f"Reference audio not found: {file_name}")
+        return candidate
+
+    def _encode_reference_audio_tokens(self, audio_path: Path, chunk_duration: float = 0.24) -> np.ndarray:
+        try:
+            import torchaudio
+        except Exception as exc:
+            raise RuntimeError("torchaudio is required for reference audio support.") from exc
+
+        wav, sr = torchaudio.load(str(audio_path))
+        if sr != SAMPLE_RATE:
+            wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)
+        if wav.dim() == 2:
+            wav = wav.unsqueeze(0)
+
+        wav = wav.to(self.device)
+        with torch.inference_mode():
+            encode_result = self.codec.encode(wav, chunk_duration=chunk_duration)
+        codes = _extract_codec_codes(encode_result)
+
+        if isinstance(codes, torch.Tensor):
+            return codes.detach().cpu().numpy()
+        return np.asarray(codes)
 
     async def ensure_loaded(self) -> None:
         if self._ready:
@@ -263,6 +337,7 @@ class RealtimeTTSRuntime:
         ws: web.WebSocketResponse,
         text: str,
         *,
+        reference_audio_path: Optional[Path],
         user_text: str,
         chunk_tokens: int,
         temperature: float,
@@ -293,7 +368,14 @@ class RealtimeTTSRuntime:
                 repetition_window=repetition_window,
             )
 
-            turn_input_ids = _build_text_only_turn_input(self.processor, user_text=user_text, prompt_tokens=None)
+            prompt_tokens = None
+            if reference_audio_path is not None:
+                prompt_tokens = self._encode_reference_audio_tokens(reference_audio_path, chunk_duration=0.24)
+            turn_input_ids = _build_text_only_turn_input(
+                self.processor,
+                user_text=user_text,
+                prompt_tokens=prompt_tokens,
+            )
             session.reset_turn(input_ids=turn_input_ids, include_system_prompt=True, reset_cache=True)
 
             decoder = self.AudioStreamDecoder(
@@ -376,6 +458,56 @@ async def index_handler(_: web.Request) -> web.Response:
     return web.FileResponse(path=DEFAULT_PAGE_PATH)
 
 
+async def upload_reference_handler(request: web.Request) -> web.Response:
+    reader = await request.multipart()
+    if reader is None:
+        return web.json_response({"ok": False, "message": "multipart/form-data is required."}, status=400)
+
+    field = await reader.next()
+    if field is None or field.name != "file":
+        return web.json_response({"ok": False, "message": "Missing 'file' field."}, status=400)
+
+    original_name = field.filename or "reference.wav"
+    suffix = Path(original_name).suffix
+    if not suffix:
+        suffix = ".wav"
+
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    file_id = f"ref_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid4().hex[:8]}{suffix}"
+    file_path = UPLOADS_DIR / file_id
+
+    size = 0
+    try:
+        with open(file_path, "wb") as out_file:
+            while True:
+                chunk = await field.read_chunk(size=64 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise ValueError(f"File too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+                out_file.write(chunk)
+    except Exception as exc:
+        try:
+            file_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return web.json_response({"ok": False, "message": str(exc)}, status=400)
+
+    if size == 0:
+        file_path.unlink(missing_ok=True)
+        return web.json_response({"ok": False, "message": "Uploaded file is empty."}, status=400)
+
+    return web.json_response(
+        {
+            "ok": True,
+            "reference_audio_id": file_id,
+            "original_name": original_name,
+            "size_bytes": size,
+        }
+    )
+
+
 async def health_handler(request: web.Request) -> web.Response:
     runtime: RealtimeTTSRuntime = request.app["runtime"]
     return web.json_response(
@@ -415,6 +547,7 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                 continue
 
             user_text = str(payload.get("user_text") or "Please read the following text naturally.")
+            reference_audio_id = payload.get("reference_audio_id")
             chunk_tokens = int(payload.get("chunk_tokens", 6))
             temperature = float(payload.get("temperature", 0.8))
             top_p = float(payload.get("top_p", 0.6))
@@ -424,9 +557,11 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             max_length = int(payload.get("max_length", 3000))
 
             try:
+                reference_audio_path = runtime.resolve_reference_audio_path(reference_audio_id)
                 await runtime.stream_text_to_ws(
                     ws,
                     text,
+                    reference_audio_path=reference_audio_path,
                     user_text=user_text,
                     chunk_tokens=chunk_tokens,
                     temperature=temperature,
@@ -449,6 +584,7 @@ def create_app(runtime: RealtimeTTSRuntime) -> web.Application:
     app = web.Application(client_max_size=32 * 1024 * 1024)
     app["runtime"] = runtime
     app.router.add_get("/", index_handler)
+    app.router.add_post("/upload_reference", upload_reference_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/ws", websocket_handler)
     return app
