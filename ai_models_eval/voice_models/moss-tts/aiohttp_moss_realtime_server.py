@@ -24,10 +24,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+from datetime import datetime
 import importlib.util
 import json
 import os
 import sys
+import wave
 from pathlib import Path
 from typing import Iterator
 
@@ -59,6 +61,7 @@ DEFAULT_CODEC_PATH = (
     / "MOSS-Audio-Tokenizer_main"
 )
 DEFAULT_RT_PKG_PATH = BASE_DIR / "repos" / "MOSS-TTS" / "moss_tts_realtime"
+OUTPUTS_DIR = BASE_DIR / "outputs"
 SAMPLE_RATE = 24000
 
 
@@ -241,7 +244,11 @@ INDEX_HTML = """
           return;
         }
         if (msg.type === 'done') {
-          setStatus('Done.');
+          if (msg.saved_wav) {
+            setStatus(`Done. Saved: ${msg.saved_wav}`);
+          } else {
+            setStatus('Done.');
+          }
           return;
         }
         if (msg.type === 'error') {
@@ -347,6 +354,11 @@ class RealtimeTTSRuntime:
         self.MossTTSRealtimeInference = None
         self.MossTTSRealtimeStreamingSession = None
         self.AudioStreamDecoder = None
+
+    def _new_output_wav_path(self) -> Path:
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return OUTPUTS_DIR / f"stream_{stamp}.wav"
 
     async def ensure_loaded(self) -> None:
         if self._ready:
@@ -482,48 +494,63 @@ class RealtimeTTSRuntime:
             audio_eos_token = int(getattr(inferencer, "audio_eos_token", 1026))
 
             chunk_index = 0
+            out_wav_path = self._new_output_wav_path()
 
-            def _make_audio_msg(wav: torch.Tensor, idx: int) -> dict:
-                audio_f32 = wav.to(torch.float32).contiguous().numpy().reshape(-1)
-                payload = base64.b64encode(audio_f32.tobytes()).decode("ascii")
-                return {
-                    "type": "audio_chunk",
-                    "index": idx,
-                    "sample_rate": SAMPLE_RATE,
-                    "pcm_f32": payload,
-                }
+            with wave.open(str(out_wav_path), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(SAMPLE_RATE)
 
-            with self.codec.streaming(batch_size=1):
-                for start in range(0, len(text_tokens), step):
-                    token_chunk = text_tokens[start : start + step]
-                    audio_frames = session.push_text_tokens(token_chunk)
-                    for wav in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
-                        chunk_index += 1
-                        await ws.send_json(_make_audio_msg(wav, chunk_index))
-                    await asyncio.sleep(0)
+                async def _send_chunk(wav_chunk: torch.Tensor) -> None:
+                    nonlocal chunk_index
+                    audio_f32 = wav_chunk.to(torch.float32).contiguous().numpy().reshape(-1)
+                    audio_f32 = np.clip(audio_f32, -1.0, 1.0)
+                    pcm16 = (audio_f32 * 32767.0).round().astype(np.int16)
+                    wf.writeframes(pcm16.tobytes())
 
-                audio_frames = session.end_text()
-                for wav in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
                     chunk_index += 1
-                    await ws.send_json(_make_audio_msg(wav, chunk_index))
+                    payload = base64.b64encode(audio_f32.tobytes()).decode("ascii")
+                    await ws.send_json(
+                        {
+                            "type": "audio_chunk",
+                            "index": chunk_index,
+                            "sample_rate": SAMPLE_RATE,
+                            "pcm_f32": payload,
+                        }
+                    )
 
-                while True:
-                    audio_frames = session.drain(max_steps=1)
-                    if not audio_frames:
-                        break
-                    for wav in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
-                        chunk_index += 1
-                        await ws.send_json(_make_audio_msg(wav, chunk_index))
-                    if session.inferencer.is_finished:
-                        break
-                    await asyncio.sleep(0)
+                with self.codec.streaming(batch_size=1):
+                    for start in range(0, len(text_tokens), step):
+                        token_chunk = text_tokens[start : start + step]
+                        audio_frames = session.push_text_tokens(token_chunk)
+                        for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
+                            await _send_chunk(wav_chunk)
+                        await asyncio.sleep(0)
 
-                final_chunk = decoder.flush()
-                if final_chunk is not None and final_chunk.numel() > 0:
-                    chunk_index += 1
-                    await ws.send_json(_make_audio_msg(final_chunk.detach().cpu(), chunk_index))
+                    audio_frames = session.end_text()
+                    for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
+                        await _send_chunk(wav_chunk)
 
-            await ws.send_json({"type": "done", "chunks": chunk_index})
+                    while True:
+                        audio_frames = session.drain(max_steps=1)
+                        if not audio_frames:
+                            break
+                        for wav_chunk in self._decode_audio_frames(audio_frames, decoder, codebook_size, audio_eos_token):
+                            await _send_chunk(wav_chunk)
+                        if session.inferencer.is_finished:
+                            break
+                        await asyncio.sleep(0)
+
+                    final_chunk = decoder.flush()
+                    if final_chunk is not None and final_chunk.numel() > 0:
+                        await _send_chunk(final_chunk.detach().cpu())
+
+            try:
+                saved_wav = str(out_wav_path.relative_to(BASE_DIR))
+            except ValueError:
+                saved_wav = str(out_wav_path)
+
+            await ws.send_json({"type": "done", "chunks": chunk_index, "saved_wav": saved_wav})
 
 
 async def index_handler(_: web.Request) -> web.Response:
