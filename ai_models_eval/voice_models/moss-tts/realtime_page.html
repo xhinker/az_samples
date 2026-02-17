@@ -116,18 +116,19 @@
     setStatus('Connecting...');
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const socket = new WebSocket(`${proto}://${location.host}/ws`);
+    ws = socket;
 
-    ws.onopen = () => {
+    socket.onopen = () => {
       setStatus('Streaming...');
       const payload = {
         text,
         chunk_tokens: Number(chunkTokensEl.value || 6),
       };
-      ws.send(JSON.stringify(payload));
+      socket.send(JSON.stringify(payload));
     };
 
-    ws.onmessage = async (event) => {
+    socket.onmessage = async (event) => {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'audio_chunk') {
@@ -156,12 +157,14 @@
       }
     };
 
-    ws.onerror = () => {
+    socket.onerror = () => {
       setStatus('WebSocket error.');
     };
 
-    ws.onclose = () => {
-      ws = null;
+    socket.onclose = () => {
+      if (ws === socket) {
+        ws = null;
+      }
     };
   });
 
