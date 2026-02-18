@@ -38,7 +38,7 @@ DEFAULT_VOICE_CLONE_MODEL_ID = (
 DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
 STREAM_DECODE_EVERY_FRAMES = 12
-STREAM_DECODE_OVERLAP_FRAMES = 8
+STREAM_DECODE_OVERLAP_FRAMES = 24
 STREAM_MAX_DECODE_FRAMES = 144
 STREAM_POLL_SECONDS = 0.01
 STREAM_BUFFER_RESET_SECONDS = 30.0
@@ -455,14 +455,20 @@ class QwenStreamingService:
                 if isinstance(hidden_states, (tuple, list)) and hidden_states:
                     codec_ids = hidden_states[-1]
                     if codec_ids is not None:
-                        frame = codec_ids[0].detach().to("cpu", dtype=torch.long).view(-1)
+                        frame = codec_ids[0].detach().to("cpu", dtype=torch.long)
+                        if frame.ndim == 0:
+                            frame = frame.view(1, 1)
+                        elif frame.ndim == 1:
+                            frame = frame.view(1, -1)
+                        elif frame.ndim > 2:
+                            frame = frame.reshape(frame.shape[0], -1)
                         if frame.numel() == 0:
                             return
-                        if int(frame[0].item()) == eos_token_id:
+                        if int(frame[0, 0].item()) == eos_token_id:
                             stop_event.set()
                             events.put(("eos", None))
                             return
-                        events.put(("frame", frame))
+                        events.put(("frame", frame.contiguous()))
             except Exception as hook_exc:  # pragma: no cover
                 events.put(("error", f"stream hook failed: {hook_exc}"))
 
@@ -491,10 +497,38 @@ class QwenStreamingService:
             return np.zeros(0, dtype=np.float32), self.sampling_rate_for_mode("voice_clone")
 
         decode_codes = generated_codes
+        if decode_codes.ndim == 0:
+            decode_codes = decode_codes.view(1, 1)
+        elif decode_codes.ndim == 1:
+            decode_codes = decode_codes.view(-1, 1)
+        elif decode_codes.ndim > 2:
+            decode_codes = decode_codes.reshape(decode_codes.shape[0], -1)
+
         ref_len = 0
         if prepend_ref_code and ref_code is not None and ref_code.numel() > 0:
-            ref_len = int(ref_code.shape[0])
-            decode_codes = torch.cat([ref_code, generated_codes], dim=0)
+            ref_codes = ref_code.detach()
+            if ref_codes.ndim == 0:
+                ref_codes = ref_codes.view(1, 1)
+            elif ref_codes.ndim == 1:
+                if decode_codes.ndim == 2 and decode_codes.shape[1] > 0 and ref_codes.numel() % decode_codes.shape[1] == 0:
+                    ref_codes = ref_codes.view(-1, decode_codes.shape[1])
+                else:
+                    ref_codes = ref_codes.view(-1, 1)
+            elif ref_codes.ndim > 2:
+                ref_codes = ref_codes.reshape(ref_codes.shape[0], -1)
+
+            if ref_codes.ndim == 2 and decode_codes.ndim == 2 and ref_codes.shape[1] != decode_codes.shape[1]:
+                if ref_codes.shape[0] == decode_codes.shape[1]:
+                    ref_codes_t = ref_codes.transpose(0, 1).contiguous()
+                    if ref_codes_t.shape[1] == decode_codes.shape[1]:
+                        ref_codes = ref_codes_t
+                if ref_codes.shape[1] != decode_codes.shape[1]:
+                    raise RuntimeError(
+                        f"Reference/code dimensions mismatch: ref_code={tuple(ref_codes.shape)}, generated={tuple(decode_codes.shape)}"
+                    )
+
+            ref_len = int(ref_codes.shape[0])
+            decode_codes = torch.cat([ref_codes, decode_codes], dim=0)
 
         wavs, sample_rate = model.model.speech_tokenizer.decode([{"audio_codes": decode_codes}])
         wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
@@ -545,7 +579,7 @@ class QwenStreamingService:
 
         decoded_global_frames = 0
         frame_base_global = 0
-        frame_buffer: list[torch.Tensor] = []
+        frame_buffer = torch.empty((0, 0), dtype=torch.long)
         ref_trim_samples = 0
         done = False
         reset_anchor_global = 0
@@ -581,7 +615,30 @@ class QwenStreamingService:
                         break
                     had_event = True
                     if event == "frame":
-                        frame_buffer.append(payload)
+                        if payload.numel() > 0:
+                            payload_2d = payload
+                            if payload_2d.ndim == 0:
+                                payload_2d = payload_2d.view(1, 1)
+                            elif payload_2d.ndim == 1:
+                                payload_2d = payload_2d.view(1, -1)
+                            elif payload_2d.ndim > 2:
+                                payload_2d = payload_2d.reshape(payload_2d.shape[0], -1)
+
+                            if frame_buffer.numel() == 0:
+                                frame_buffer = payload_2d.contiguous().clone()
+                            else:
+                                if payload_2d.shape[1] != frame_buffer.shape[1]:
+                                    expected_width = int(frame_buffer.shape[1])
+                                    if expected_width > 0 and payload_2d.numel() % expected_width == 0:
+                                        payload_2d = payload_2d.reshape(-1, expected_width)
+                                    else:
+                                        logger.warning(
+                                            "Dropping misaligned codec payload shape=%s expected_width=%s",
+                                            tuple(payload_2d.shape),
+                                            expected_width,
+                                        )
+                                        continue
+                                frame_buffer = torch.cat([frame_buffer, payload_2d], dim=0)
                     elif event == "error":
                         raise RuntimeError(payload)
                     elif event == "eos":
@@ -591,7 +648,7 @@ class QwenStreamingService:
                     elif event == "done":
                         done = True
 
-                end_global = frame_base_global + len(frame_buffer)
+                end_global = frame_base_global + int(frame_buffer.shape[0])
                 frames_ready = end_global - decoded_global_frames
                 should_decode = (
                     frames_ready >= STREAM_DECODE_EVERY_FRAMES
@@ -622,7 +679,7 @@ class QwenStreamingService:
                             await asyncio.sleep(STREAM_POLL_SECONDS)
                         continue
 
-                    codes = torch.stack(frame_buffer[start_local:end_local], dim=0)
+                    codes = frame_buffer[start_local:end_local]
                     prepend_ref_code = (
                         has_ref_code
                         and (needs_ref_prepend or start_global == reset_anchor_global)
@@ -671,7 +728,7 @@ class QwenStreamingService:
                     )
                     drop = keep_from_global - frame_base_global
                     if drop > 0:
-                        frame_buffer = frame_buffer[drop:]
+                        frame_buffer = frame_buffer[drop:].contiguous()
                         frame_base_global = keep_from_global
 
                     if prepend_ref_code:
@@ -688,10 +745,11 @@ class QwenStreamingService:
                             decoded_global_frames - frame_base_global,
                         ))
                         if overlap_keep > 0:
-                            frame_buffer = frame_buffer[-overlap_keep:]
+                            frame_buffer = frame_buffer[-overlap_keep:].contiguous()
                             frame_base_global = decoded_global_frames - overlap_keep
                         else:
-                            frame_buffer = []
+                            empty_width = int(frame_buffer.shape[1]) if frame_buffer.ndim == 2 else 0
+                            frame_buffer = torch.empty((0, empty_width), dtype=torch.long)
                             frame_base_global = decoded_global_frames
 
                         reset_anchor_global = decoded_global_frames
