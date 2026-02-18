@@ -12,8 +12,8 @@ let activeSources = new Set();
 let controller = null;
 let pcmStash = new Uint8Array(0);
 
-const STARTUP_BUFFER_SEC = 0.9;
-const MIN_SOURCE_SAMPLES = 4096;
+const STARTUP_BUFFER_SEC = 1.2;
+const MIN_SOURCE_SAMPLES = 8192;
 
 function log(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;

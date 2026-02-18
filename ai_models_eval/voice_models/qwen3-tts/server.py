@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import threading
 import tempfile
 from queue import Empty, Queue
@@ -44,11 +45,12 @@ DEFAULT_VOICE_CLONE_MODEL_ID = (
 )
 DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
-STREAM_DECODE_EVERY_FRAMES = 6
+STREAM_DECODE_EVERY_FRAMES = 12
+STREAM_DECODE_OVERLAP_FRAMES = 24
+STREAM_MAX_DECODE_FRAMES = 144
 STREAM_POLL_SECONDS = 0.01
-STREAM_LOOKBACK_FRAMES = 48
-STREAM_MAX_DECODE_FRAMES = 384
 DEFAULT_DECODE_HOP = 1920
+TEXT_REANCHOR_MAX_WORDS = 90
 
 
 class StopEventCriteria(StoppingCriteria):
@@ -61,6 +63,41 @@ class StopEventCriteria(StoppingCriteria):
 
 class GenerationCancelled(Exception):
     pass
+
+
+def split_text_for_reanchor(text: str, max_words: int = TEXT_REANCHOR_MAX_WORDS) -> list[str]:
+    clean = " ".join(text.strip().split())
+    if not clean:
+        return []
+
+    sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", clean) if s]
+    segments: list[str] = []
+    current_words: list[str] = []
+
+    def flush_current():
+        if current_words:
+            segments.append(" ".join(current_words))
+            current_words.clear()
+
+    for sentence in sentences:
+        words = sentence.split()
+        if not words:
+            continue
+        if len(words) > max_words:
+            flush_current()
+            start = 0
+            while start < len(words):
+                part = words[start:start + max_words]
+                segments.append(" ".join(part))
+                start += max_words
+            continue
+
+        if len(current_words) + len(words) > max_words:
+            flush_current()
+        current_words.extend(words)
+
+    flush_current()
+    return segments if segments else [clean]
 
 
 def estimate_max_new_tokens_from_text(text: str) -> int:
@@ -455,6 +492,7 @@ class QwenStreamingService:
         generated_codes: torch.Tensor,
         ref_code: Optional[torch.Tensor],
         prepend_ref_code: bool,
+        ref_trim_samples: Optional[int] = None,
     ) -> tuple[np.ndarray, int]:
         if generated_codes.numel() == 0:
             return np.zeros(0, dtype=np.float32), self.sampling_rate_for_mode("voice_clone")
@@ -469,135 +507,212 @@ class QwenStreamingService:
         wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
 
         if ref_len > 0:
-            total_len = int(decode_codes.shape[0])
-            cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+            if ref_trim_samples is not None and ref_trim_samples >= 0:
+                cut = int(ref_trim_samples)
+            else:
+                total_len = int(decode_codes.shape[0])
+                cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+            if cut < 0:
+                cut = 0
+            if cut > wav.shape[0]:
+                cut = wav.shape[0]
             wav = wav[cut:]
 
         return wav, int(sample_rate)
 
+    def _decode_ref_prefix_samples_blocking(
+        self,
+        model,
+        ref_code: Optional[torch.Tensor],
+    ) -> tuple[int, int]:
+        if ref_code is None or ref_code.numel() == 0:
+            return 0, self.sampling_rate_for_mode("voice_clone")
+        wavs, sample_rate = model.model.speech_tokenizer.decode([{"audio_codes": ref_code}])
+        wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+        return int(wav.size), int(sample_rate)
+
+    async def _stream_prepared_pcm16(
+        self,
+        model,
+        prepared: PreparedStreamRequest,
+        expected_sr: int,
+        stop_event: threading.Event,
+    ):
+        loop = asyncio.get_running_loop()
+        events: Queue = Queue()
+        generation_future = loop.run_in_executor(
+            None,
+            self._run_generate_with_hook_blocking,
+            model,
+            prepared,
+            events,
+            stop_event,
+        )
+
+        decoded_global_frames = 0
+        frame_base_global = 0
+        frame_buffer: list[torch.Tensor] = []
+        ref_trim_samples = 0
+        done = False
+        if prepared.ref_code is not None and prepared.ref_code.numel() > 0:
+            ref_trim_samples, ref_sr = await loop.run_in_executor(
+                None,
+                self._decode_ref_prefix_samples_blocking,
+                model,
+                prepared.ref_code,
+            )
+            if ref_sr != expected_sr:
+                logger.warning(
+                    "Reference decode sample rate (%s) differs from expected sample rate (%s).",
+                    ref_sr,
+                    expected_sr,
+                )
+
+        try:
+            while True:
+                if stop_event.is_set() and done:
+                    break
+
+                had_event = False
+                while True:
+                    try:
+                        event, payload = events.get_nowait()
+                    except Empty:
+                        break
+                    had_event = True
+                    if event == "frame":
+                        frame_buffer.append(payload)
+                    elif event == "error":
+                        raise RuntimeError(payload)
+                    elif event == "eos":
+                        done = True
+                    elif event == "stopped":
+                        done = True
+                    elif event == "done":
+                        done = True
+
+                end_global = frame_base_global + len(frame_buffer)
+                frames_ready = end_global - decoded_global_frames
+                should_decode = (
+                    frames_ready >= STREAM_DECODE_EVERY_FRAMES
+                    or (done and frames_ready > 0)
+                )
+                if frames_ready > STREAM_DECODE_EVERY_FRAMES * 6:
+                    logger.warning(
+                        "Decode backlog is high (%s frames); streaming quality may degrade if GPU is saturated.",
+                        frames_ready,
+                    )
+
+                if should_decode:
+                    start_global = max(
+                        frame_base_global,
+                        decoded_global_frames - STREAM_DECODE_OVERLAP_FRAMES,
+                        end_global - STREAM_MAX_DECODE_FRAMES,
+                    )
+                    start_local = start_global - frame_base_global
+                    if start_local < 0:
+                        start_local = 0
+
+                    codes = torch.stack(frame_buffer[start_local:], dim=0)
+                    prepend_ref_code = (
+                        prepared.ref_code is not None
+                        and prepared.ref_code.numel() > 0
+                        and start_global == 0
+                    )
+                    wav_f32, sample_rate = await loop.run_in_executor(
+                        None,
+                        self._decode_codes_to_audio_blocking,
+                        model,
+                        codes,
+                        prepared.ref_code,
+                        prepend_ref_code,
+                        ref_trim_samples if prepend_ref_code else None,
+                    )
+                    local_total_frames = max(1, end_global - start_global)
+                    emitted_local_frames = max(0, decoded_global_frames - start_global)
+                    emit_from_samples = int(
+                        round((emitted_local_frames / local_total_frames) * wav_f32.size)
+                    )
+                    if emit_from_samples < 0:
+                        emit_from_samples = 0
+                    if emit_from_samples > wav_f32.size:
+                        emit_from_samples = wav_f32.size
+                    wav_delta = wav_f32[emit_from_samples:]
+                    decoded_global_frames = end_global
+
+                    if sample_rate != expected_sr:
+                        logger.warning(
+                            "Decoded sample rate (%s) differs from expected sample rate (%s).",
+                            sample_rate,
+                            expected_sr,
+                        )
+
+                    if wav_delta.size > 0:
+                        delta = wav_delta
+                        pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
+                        if pcm16.size > 0:
+                            yield pcm16.tobytes()
+
+                    keep_from_global = max(
+                        frame_base_global,
+                        decoded_global_frames - STREAM_DECODE_OVERLAP_FRAMES,
+                    )
+                    drop = keep_from_global - frame_base_global
+                    if drop > 0:
+                        frame_buffer = frame_buffer[drop:]
+                        frame_base_global = keep_from_global
+
+                if done and decoded_global_frames >= end_global:
+                    break
+                if not had_event:
+                    await asyncio.sleep(STREAM_POLL_SECONDS)
+        finally:
+            stop_event.set()
+            try:
+                await asyncio.wait_for(generation_future, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Generation thread did not stop within timeout.")
+
     async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event):
         model = await self.ensure_model(params.mode)
         expected_sr = self.sampling_rate_for_mode(params.mode)
-        decode_hop = self.decode_hop_for_mode(params.mode)
         loop = asyncio.get_running_loop()
-        prepared = await loop.run_in_executor(
-            None,
-            self._build_stream_request_blocking,
-            model,
-            params,
-        )
-        self._attach_stop_criteria(prepared, stop_event)
+        segments = split_text_for_reanchor(params.text, max_words=TEXT_REANCHOR_MAX_WORDS)
+        if not segments:
+            raise ValueError("Text is required.")
+        if len(segments) > 1:
+            logger.info("Long text detected. Re-anchoring stream into %s segments.", len(segments))
 
         stream_lock = self._stream_locks[params.mode]
         async with stream_lock:
-            events: Queue = Queue()
-            generation_future = loop.run_in_executor(
-                None,
-                self._run_generate_with_hook_blocking,
-                model,
-                prepared,
-                events,
-                stop_event,
-            )
-
-            decoded_global_frames = 0
-            frame_base_global = 0
-            frame_buffer: list[torch.Tensor] = []
-            done = False
-
-            try:
-                while True:
-                    if stop_event.is_set() and done:
-                        break
-
-                    had_event = False
-                    while True:
-                        try:
-                            event, payload = events.get_nowait()
-                        except Empty:
-                            break
-                        had_event = True
-                        if event == "frame":
-                            frame_buffer.append(payload)
-                        elif event == "error":
-                            raise RuntimeError(payload)
-                        elif event == "eos":
-                            done = True
-                        elif event == "stopped":
-                            done = True
-                        elif event == "done":
-                            done = True
-
-                    end_global = frame_base_global + len(frame_buffer)
-                    frames_ready = end_global - decoded_global_frames
-                    should_decode = (
-                        frames_ready >= STREAM_DECODE_EVERY_FRAMES
-                        or (done and frames_ready > 0)
-                    )
-
-                    if should_decode:
-                        start_global = max(
-                            frame_base_global,
-                            end_global - STREAM_MAX_DECODE_FRAMES,
-                            decoded_global_frames - STREAM_LOOKBACK_FRAMES,
-                        )
-                        start_local = start_global - frame_base_global
-                        if start_local < 0:
-                            start_local = 0
-                        codes = torch.stack(frame_buffer[start_local:], dim=0)
-                        prepend_ref_code = start_global == 0
-                        wav_f32, sample_rate = await loop.run_in_executor(
-                            None,
-                            self._decode_codes_to_audio_blocking,
-                            model,
-                            codes,
-                            prepared.ref_code,
-                            prepend_ref_code,
-                        )
-                        local_total_frames = max(1, end_global - start_global)
-                        emit_from_frames = max(0, decoded_global_frames - start_global)
-                        emit_from_samples = int(round((emit_from_frames / local_total_frames) * wav_f32.size))
-                        if emit_from_frames > 0 and emit_from_samples == 0:
-                            emit_from_samples = min(wav_f32.size, emit_from_frames * decode_hop)
-                        if emit_from_samples < 0:
-                            emit_from_samples = 0
-                        if emit_from_samples > wav_f32.size:
-                            emit_from_samples = wav_f32.size
-                        wav_delta = wav_f32[emit_from_samples:]
-                        decoded_global_frames = end_global
-
-                        if sample_rate != expected_sr:
-                            logger.warning(
-                                "Decoded sample rate (%s) differs from expected sample rate (%s).",
-                                sample_rate,
-                                expected_sr,
-                            )
-
-                        if wav_delta.size > 0:
-                            delta = wav_delta
-                            pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
-                            if pcm16.size > 0:
-                                yield pcm16.tobytes()
-
-                        keep_from_global = max(
-                            frame_base_global,
-                            decoded_global_frames - STREAM_LOOKBACK_FRAMES,
-                        )
-                        drop = keep_from_global - frame_base_global
-                        if drop > 0:
-                            frame_buffer = frame_buffer[drop:]
-                            frame_base_global = keep_from_global
-
-                    if done and decoded_global_frames >= end_global:
-                        break
-                    if not had_event:
-                        await asyncio.sleep(STREAM_POLL_SECONDS)
-            finally:
-                stop_event.set()
-                try:
-                    await asyncio.wait_for(generation_future, timeout=5.0)
-                except asyncio.TimeoutError:
-                    logger.warning("Generation thread did not stop within timeout.")
+            for idx, segment_text in enumerate(segments, start=1):
+                if stop_event.is_set():
+                    break
+                segment_params = StreamParams(
+                    text=segment_text,
+                    mode=params.mode,
+                    language=params.language,
+                    speaker=params.speaker,
+                    instruction=params.instruction,
+                    reference_audio_bytes=params.reference_audio_bytes,
+                    reference_text=params.reference_text,
+                )
+                prepared = await loop.run_in_executor(
+                    None,
+                    self._build_stream_request_blocking,
+                    model,
+                    segment_params,
+                )
+                self._attach_stop_criteria(prepared, stop_event)
+                if len(segments) > 1:
+                    logger.info("Streaming segment %s/%s", idx, len(segments))
+                async for pcm_chunk in self._stream_prepared_pcm16(
+                    model=model,
+                    prepared=prepared,
+                    expected_sr=expected_sr,
+                    stop_event=stop_event,
+                ):
+                    yield pcm_chunk
 
 
 async def index_handler(request: web.Request):
