@@ -49,6 +49,7 @@ STREAM_DECODE_EVERY_FRAMES = 12
 STREAM_DECODE_OVERLAP_FRAMES = 24
 STREAM_MAX_DECODE_FRAMES = 144
 STREAM_POLL_SECONDS = 0.01
+STREAM_BUFFER_RESET_SECONDS = 30.0
 DEFAULT_DECODE_HOP = 1920
 TEXT_REANCHOR_MAX_WORDS = 90
 
@@ -536,6 +537,7 @@ class QwenStreamingService:
         model,
         prepared: PreparedStreamRequest,
         expected_sr: int,
+        decode_hop: int,
         stop_event: threading.Event,
     ):
         loop = asyncio.get_running_loop()
@@ -554,6 +556,12 @@ class QwenStreamingService:
         frame_buffer: list[torch.Tensor] = []
         ref_trim_samples = 0
         done = False
+        reset_anchor_global = 0
+        emitted_samples_since_reset = 0
+        reset_samples_threshold = max(1, int(round(expected_sr * STREAM_BUFFER_RESET_SECONDS)))
+        decode_hop_samples = max(1, int(decode_hop))
+        has_ref_code = prepared.ref_code is not None and prepared.ref_code.numel() > 0
+        needs_ref_prepend = has_ref_code
         if prepared.ref_code is not None and prepared.ref_code.numel() > 0:
             ref_trim_samples, ref_sr = await loop.run_in_executor(
                 None,
@@ -604,20 +612,28 @@ class QwenStreamingService:
                     )
 
                 if should_decode:
+                    decode_end_global = min(
+                        end_global,
+                        decoded_global_frames + STREAM_MAX_DECODE_FRAMES,
+                    )
                     start_global = max(
                         frame_base_global,
                         decoded_global_frames - STREAM_DECODE_OVERLAP_FRAMES,
-                        end_global - STREAM_MAX_DECODE_FRAMES,
                     )
                     start_local = start_global - frame_base_global
                     if start_local < 0:
                         start_local = 0
 
-                    codes = torch.stack(frame_buffer[start_local:], dim=0)
+                    end_local = decode_end_global - frame_base_global
+                    if end_local <= start_local:
+                        if not had_event:
+                            await asyncio.sleep(STREAM_POLL_SECONDS)
+                        continue
+
+                    codes = torch.stack(frame_buffer[start_local:end_local], dim=0)
                     prepend_ref_code = (
-                        prepared.ref_code is not None
-                        and prepared.ref_code.numel() > 0
-                        and start_global == 0
+                        has_ref_code
+                        and (needs_ref_prepend or start_global == reset_anchor_global)
                     )
                     wav_f32, sample_rate = await loop.run_in_executor(
                         None,
@@ -628,17 +644,20 @@ class QwenStreamingService:
                         prepend_ref_code,
                         ref_trim_samples if prepend_ref_code else None,
                     )
-                    local_total_frames = max(1, end_global - start_global)
+                    local_total_frames = max(1, decode_end_global - start_global)
                     emitted_local_frames = max(0, decoded_global_frames - start_global)
-                    emit_from_samples = int(
-                        round((emitted_local_frames / local_total_frames) * wav_f32.size)
-                    )
+                    emit_from_samples = int(emitted_local_frames * decode_hop_samples)
+                    if emit_from_samples > wav_f32.size:
+                        # Keep continuity if decode window/sample mapping drifts slightly.
+                        emit_from_samples = int(
+                            round((emitted_local_frames / local_total_frames) * wav_f32.size)
+                        )
                     if emit_from_samples < 0:
                         emit_from_samples = 0
                     if emit_from_samples > wav_f32.size:
                         emit_from_samples = wav_f32.size
                     wav_delta = wav_f32[emit_from_samples:]
-                    decoded_global_frames = end_global
+                    decoded_global_frames = decode_end_global
 
                     if sample_rate != expected_sr:
                         logger.warning(
@@ -651,6 +670,7 @@ class QwenStreamingService:
                         delta = wav_delta
                         pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
                         if pcm16.size > 0:
+                            emitted_samples_since_reset += int(wav_delta.size)
                             yield pcm16.tobytes()
 
                     keep_from_global = max(
@@ -661,6 +681,25 @@ class QwenStreamingService:
                     if drop > 0:
                         frame_buffer = frame_buffer[drop:]
                         frame_base_global = keep_from_global
+
+                    if prepend_ref_code:
+                        needs_ref_prepend = False
+
+                    if (
+                        emitted_samples_since_reset >= reset_samples_threshold
+                        and decoded_global_frames >= end_global
+                    ):
+                        # Periodically reset decode state to avoid long-run drift.
+                        reset_anchor_global = decoded_global_frames
+                        frame_buffer = []
+                        frame_base_global = reset_anchor_global
+                        decoded_global_frames = reset_anchor_global
+                        emitted_samples_since_reset = 0
+                        needs_ref_prepend = has_ref_code
+                        logger.info(
+                            "Reset streaming decode buffer after %.1fs of emitted audio.",
+                            STREAM_BUFFER_RESET_SECONDS,
+                        )
 
                 if done and decoded_global_frames >= end_global:
                     break
@@ -710,6 +749,7 @@ class QwenStreamingService:
                     model=model,
                     prepared=prepared,
                     expected_sr=expected_sr,
+                    decode_hop=self.decode_hop_for_mode(params.mode),
                     stop_event=stop_event,
                 ):
                     yield pcm_chunk
