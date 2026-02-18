@@ -46,8 +46,8 @@ DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
 STREAM_DECODE_EVERY_FRAMES = 6
 STREAM_POLL_SECONDS = 0.01
-STREAM_LOOKBACK_FRAMES = 16
-STREAM_MAX_DECODE_FRAMES = 160
+STREAM_LOOKBACK_FRAMES = 48
+STREAM_MAX_DECODE_FRAMES = 384
 DEFAULT_DECODE_HOP = 1920
 
 
@@ -61,6 +61,13 @@ class StopEventCriteria(StoppingCriteria):
 
 class GenerationCancelled(Exception):
     pass
+
+
+def estimate_max_new_tokens_from_text(text: str) -> int:
+    words = len(text.split())
+    chars = len(text)
+    estimated = max(int(words * 7.0), int(chars * 1.6)) + 160
+    return max(192, min(4096, estimated))
 
 
 def _resolve_dtype(dtype_str: str):
@@ -296,6 +303,19 @@ class QwenStreamingService:
         languages = [params.language or DEFAULT_LANGUAGE]
         model._validate_languages(languages)
         gen_kwargs = model._merge_generate_kwargs(non_streaming_mode=False)
+        try:
+            requested_max_new_tokens = int(gen_kwargs.get("max_new_tokens", 2048))
+        except (TypeError, ValueError):
+            requested_max_new_tokens = 2048
+        safe_max_new_tokens = int(estimate_max_new_tokens_from_text(text) * 1.4)
+        gen_kwargs["max_new_tokens"] = max(64, min(requested_max_new_tokens, safe_max_new_tokens))
+        if gen_kwargs["max_new_tokens"] != requested_max_new_tokens:
+            logger.info(
+                "Adjusted max_new_tokens from %s to %s for text length=%s",
+                requested_max_new_tokens,
+                gen_kwargs["max_new_tokens"],
+                len(text),
+            )
 
         if params.mode == "custom_voice":
             speakers = [params.speaker]
@@ -393,6 +413,7 @@ class QwenStreamingService:
         stop_event: threading.Event,
     ) -> None:
         talker = model.model.talker
+        eos_token_id = int(model.model.config.talker_config.codec_eos_token_id)
 
         def on_forward_pre(_module, _inputs):
             if stop_event.is_set():
@@ -404,7 +425,13 @@ class QwenStreamingService:
                 if isinstance(hidden_states, (tuple, list)) and hidden_states:
                     codec_ids = hidden_states[-1]
                     if codec_ids is not None:
-                        frame = codec_ids[0].detach().to("cpu", dtype=torch.long)
+                        frame = codec_ids[0].detach().to("cpu", dtype=torch.long).view(-1)
+                        if frame.numel() == 0:
+                            return
+                        if int(frame[0].item()) == eos_token_id:
+                            stop_event.set()
+                            events.put(("eos", None))
+                            return
                         events.put(("frame", frame))
             except Exception as hook_exc:  # pragma: no cover
                 events.put(("error", f"stream hook failed: {hook_exc}"))
@@ -494,6 +521,8 @@ class QwenStreamingService:
                             frame_buffer.append(payload)
                         elif event == "error":
                             raise RuntimeError(payload)
+                        elif event == "eos":
+                            done = True
                         elif event == "stopped":
                             done = True
                         elif event == "done":
@@ -525,8 +554,11 @@ class QwenStreamingService:
                             prepared.ref_code,
                             prepend_ref_code,
                         )
+                        local_total_frames = max(1, end_global - start_global)
                         emit_from_frames = max(0, decoded_global_frames - start_global)
-                        emit_from_samples = emit_from_frames * decode_hop
+                        emit_from_samples = int(round((emit_from_frames / local_total_frames) * wav_f32.size))
+                        if emit_from_frames > 0 and emit_from_samples == 0:
+                            emit_from_samples = min(wav_f32.size, emit_from_frames * decode_hop)
                         if emit_from_samples < 0:
                             emit_from_samples = 0
                         if emit_from_samples > wav_f32.size:
