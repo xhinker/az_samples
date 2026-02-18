@@ -7,12 +7,11 @@ import argparse
 import asyncio
 import logging
 import os
-import re
 import tempfile
-import time
+from queue import Empty, Queue
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from aiohttp import web
@@ -43,46 +42,8 @@ DEFAULT_VOICE_CLONE_MODEL_ID = (
 )
 DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
-WORDS_PER_CHUNK = 12
-SILENCE_TRIM_THRESHOLD = 1e-3
-KEEP_TAIL_SILENCE_SECONDS = 0.08
-
-
-def split_text_for_streaming(text: str, words_per_chunk: int = WORDS_PER_CHUNK) -> list[str]:
-    clean = " ".join(text.strip().split())
-    if not clean:
-        return []
-
-    # Split on sentence and major clause punctuation to reduce long per-chunk latency.
-    sentences = [s for s in re.split(r"(?<=[.!?。！？,，;；:：])\s+", clean) if s]
-    chunks: list[str] = []
-    for sentence in sentences:
-        words = sentence.split()
-        while len(words) > words_per_chunk:
-            chunks.append(" ".join(words[:words_per_chunk]))
-            words = words[words_per_chunk:]
-        if words:
-            chunks.append(" ".join(words))
-    return chunks
-
-
-def trim_trailing_silence(
-    wav_f32: np.ndarray,
-    sample_rate: int,
-    threshold: float = SILENCE_TRIM_THRESHOLD,
-    keep_tail_seconds: float = KEEP_TAIL_SILENCE_SECONDS,
-) -> np.ndarray:
-    if wav_f32.size == 0:
-        return wav_f32
-
-    non_silent = np.flatnonzero(np.abs(wav_f32) > threshold)
-    if non_silent.size == 0:
-        return wav_f32
-
-    last_non_silent = int(non_silent[-1])
-    keep_tail_samples = max(1, int(sample_rate * keep_tail_seconds))
-    cut_index = min(wav_f32.size, last_non_silent + 1 + keep_tail_samples)
-    return wav_f32[:cut_index]
+STREAM_DECODE_EVERY_FRAMES = 6
+STREAM_POLL_SECONDS = 0.01
 
 
 def _resolve_dtype(dtype_str: str):
@@ -111,6 +72,12 @@ class StreamParams:
     reference_text: str
 
 
+@dataclass
+class PreparedStreamRequest:
+    generate_kwargs: dict[str, Any]
+    ref_code: Optional[torch.Tensor]
+
+
 class QwenStreamingService:
     def __init__(
         self,
@@ -128,6 +95,11 @@ class QwenStreamingService:
         self._models: dict[str, object] = {}
         self._sampling_rates: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {
+            "custom_voice": asyncio.Lock(),
+            "voice_clone": asyncio.Lock(),
+        }
+        # True streaming hooks into model internals; keep one active generation per model.
+        self._stream_locks: dict[str, asyncio.Lock] = {
             "custom_voice": asyncio.Lock(),
             "voice_clone": asyncio.Lock(),
         }
@@ -249,111 +221,213 @@ class QwenStreamingService:
             except OSError:
                 logger.warning("Failed to delete temp file: %s", temp_path)
 
-    def _generate_audio_chunk_blocking(
+    def _build_stream_request_blocking(
         self,
         model,
-        text_chunk: str,
-        mode: str,
-        language: str,
-        speaker: str,
-        instruction: str,
-        voice_clone_prompt: Optional[str],
-    ):
-        if mode == "voice_clone":
-            if not voice_clone_prompt:
-                raise ValueError("Voice clone mode requires a prepared voice clone prompt.")
-            clone_kwargs = {
-                "text": text_chunk,
-                "language": language,
-                "voice_clone_prompt": voice_clone_prompt,
-                "non_streaming_mode": False,
-            }
-            if instruction:
-                clone_kwargs["instruct"] = instruction
-            try:
-                wavs, sample_rate = model.generate_voice_clone(**clone_kwargs)
-            except TypeError:
-                clone_kwargs.pop("instruct", None)
-                wavs, sample_rate = model.generate_voice_clone(**clone_kwargs)
-        else:
-            kwargs = {
-                "text": text_chunk,
-                "language": language,
-                "speaker": speaker,
-            }
-            if instruction:
-                kwargs["instruct"] = instruction
-            wavs, sample_rate = model.generate_custom_voice(**kwargs)
+        params: StreamParams,
+    ) -> PreparedStreamRequest:
+        text = params.text.strip()
+        if not text:
+            raise ValueError("Text is required.")
 
-        if isinstance(wavs, (list, tuple)):
-            wav = wavs[0]
-        else:
-            wav = wavs
-        wav_f32 = np.asarray(wav, dtype=np.float32).reshape(-1)
-        return wav_f32, int(sample_rate)
+        input_ids = model._tokenize_texts([model._build_assistant_text(text)])
+        languages = [params.language or DEFAULT_LANGUAGE]
+        model._validate_languages(languages)
+        gen_kwargs = model._merge_generate_kwargs(non_streaming_mode=False)
+
+        if params.mode == "custom_voice":
+            speakers = [params.speaker]
+            model._validate_speakers(speakers)
+
+            instruct_ids = [None]
+            if params.instruction:
+                instruct_ids = [model._tokenize_texts([model._build_instruct_text(params.instruction)])[0]]
+
+            return PreparedStreamRequest(
+                generate_kwargs={
+                    "input_ids": input_ids,
+                    "instruct_ids": instruct_ids,
+                    "languages": languages,
+                    "speakers": speakers,
+                    "non_streaming_mode": False,
+                    **gen_kwargs,
+                },
+                ref_code=None,
+            )
+
+        if params.mode != "voice_clone":
+            raise ValueError(f"Unsupported mode: {params.mode!r}")
+        if not params.reference_audio_bytes:
+            raise ValueError("Reference audio file is required in voice_clone mode.")
+        if not params.reference_text.strip():
+            raise ValueError("Reference transcript is required in voice_clone mode.")
+
+        prompt_items = self._create_voice_clone_prompt(
+            model,
+            params.reference_audio_bytes,
+            params.reference_text,
+        )
+        if len(prompt_items) != 1:
+            raise ValueError(f"Expected 1 prompt item, got {len(prompt_items)}.")
+
+        voice_clone_prompt = model._prompt_items_to_voice_clone_prompt(prompt_items)
+        ref_texts_for_ids = [prompt_items[0].ref_text]
+        ref_ids = []
+        for ref_text in ref_texts_for_ids:
+            if ref_text is None or ref_text == "":
+                ref_ids.append(None)
+            else:
+                ref_ids.append(model._tokenize_texts([model._build_ref_text(ref_text)])[0])
+
+        ref_code = None
+        ref_code_list = voice_clone_prompt.get("ref_code")
+        if ref_code_list and ref_code_list[0] is not None:
+            ref_code = ref_code_list[0].detach().to("cpu", dtype=torch.long)
+
+        return PreparedStreamRequest(
+            generate_kwargs={
+                "input_ids": input_ids,
+                "ref_ids": ref_ids,
+                "voice_clone_prompt": voice_clone_prompt,
+                "languages": languages,
+                "non_streaming_mode": False,
+                **gen_kwargs,
+            },
+            ref_code=ref_code,
+        )
+
+    def _run_generate_with_hook_blocking(
+        self,
+        model,
+        prepared: PreparedStreamRequest,
+        events: Queue,
+    ) -> None:
+        talker = model.model.talker
+
+        def on_forward(_module, _inputs, out):
+            try:
+                hidden_states = getattr(out, "hidden_states", None)
+                if isinstance(hidden_states, (tuple, list)) and hidden_states:
+                    codec_ids = hidden_states[-1]
+                    if codec_ids is not None:
+                        frame = codec_ids[0].detach().to("cpu", dtype=torch.long)
+                        events.put(("frame", frame))
+            except Exception as hook_exc:  # pragma: no cover
+                events.put(("error", f"stream hook failed: {hook_exc}"))
+
+        hook_handle = talker.register_forward_hook(on_forward)
+        try:
+            model.model.generate(**prepared.generate_kwargs)
+        except Exception as exc:
+            events.put(("error", str(exc)))
+        finally:
+            hook_handle.remove()
+            events.put(("done", None))
+
+    def _decode_codes_to_audio_blocking(
+        self,
+        model,
+        generated_codes: torch.Tensor,
+        ref_code: Optional[torch.Tensor],
+    ) -> tuple[np.ndarray, int]:
+        if generated_codes.numel() == 0:
+            return np.zeros(0, dtype=np.float32), self.sampling_rate_for_mode("voice_clone")
+
+        decode_codes = generated_codes
+        ref_len = 0
+        if ref_code is not None and ref_code.numel() > 0:
+            ref_len = int(ref_code.shape[0])
+            decode_codes = torch.cat([ref_code, generated_codes], dim=0)
+
+        wavs, sample_rate = model.model.speech_tokenizer.decode([{"audio_codes": decode_codes}])
+        wav = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+
+        if ref_len > 0:
+            total_len = int(decode_codes.shape[0])
+            cut = int(ref_len / max(total_len, 1) * wav.shape[0])
+            wav = wav[cut:]
+
+        return wav, int(sample_rate)
 
     async def stream_pcm16(self, params: StreamParams):
         model = await self.ensure_model(params.mode)
         expected_sr = self.sampling_rate_for_mode(params.mode)
+        loop = asyncio.get_running_loop()
+        prepared = await loop.run_in_executor(
+            None,
+            self._build_stream_request_blocking,
+            model,
+            params,
+        )
 
-        chunks = split_text_for_streaming(params.text)
-        if not chunks:
-            raise ValueError("Text is empty after normalization.")
-
-        voice_clone_prompt = None
-        if params.mode == "voice_clone":
-            if not params.reference_audio_bytes:
-                raise ValueError("Reference audio file is required in voice_clone mode.")
-            if not params.reference_text.strip():
-                raise ValueError("Reference transcript is required in voice_clone mode.")
-            loop = asyncio.get_running_loop()
-            voice_clone_prompt = await loop.run_in_executor(
+        stream_lock = self._stream_locks[params.mode]
+        async with stream_lock:
+            events: Queue = Queue()
+            generation_future = loop.run_in_executor(
                 None,
-                self._create_voice_clone_prompt,
+                self._run_generate_with_hook_blocking,
                 model,
-                params.reference_audio_bytes,
-                params.reference_text,
+                prepared,
+                events,
             )
 
-        total_chunks = len(chunks)
-        for index, text_chunk in enumerate(chunks, start=1):
-            t0 = time.perf_counter()
-            loop = asyncio.get_running_loop()
-            wav_f32, sample_rate = await loop.run_in_executor(
-                None,
-                self._generate_audio_chunk_blocking,
-                model,
-                text_chunk,
-                params.mode,
-                params.language,
-                params.speaker,
-                params.instruction,
-                voice_clone_prompt,
-            )
-            gen_time = time.perf_counter() - t0
+            emitted_samples = 0
+            decoded_frames = 0
+            frame_buffer: list[torch.Tensor] = []
+            done = False
 
-            if sample_rate != expected_sr:
-                logger.warning(
-                    "Chunk sample rate (%s) differs from model sample rate (%s).",
-                    sample_rate,
-                    expected_sr,
+            while True:
+                had_event = False
+                while True:
+                    try:
+                        event, payload = events.get_nowait()
+                    except Empty:
+                        break
+                    had_event = True
+                    if event == "frame":
+                        frame_buffer.append(payload)
+                    elif event == "error":
+                        raise RuntimeError(payload)
+                    elif event == "done":
+                        done = True
+
+                frames_ready = len(frame_buffer) - decoded_frames
+                should_decode = (
+                    frames_ready >= STREAM_DECODE_EVERY_FRAMES
+                    or (done and frames_ready > 0)
                 )
 
-            if wav_f32.size == 0:
-                continue
+                if should_decode:
+                    codes = torch.stack(frame_buffer, dim=0)
+                    wav_f32, sample_rate = await loop.run_in_executor(
+                        None,
+                        self._decode_codes_to_audio_blocking,
+                        model,
+                        codes,
+                        prepared.ref_code,
+                    )
+                    decoded_frames = len(frame_buffer)
 
-            if index < total_chunks:
-                wav_f32 = trim_trailing_silence(wav_f32, sample_rate)
+                    if sample_rate != expected_sr:
+                        logger.warning(
+                            "Decoded sample rate (%s) differs from expected sample rate (%s).",
+                            sample_rate,
+                            expected_sr,
+                        )
 
-            pcm16 = np.clip(wav_f32 * 32767.0, -32768, 32767).astype(np.int16)
-            logger.info(
-                "Chunk %s/%s generated in %.2fs, %.2fs audio",
-                index,
-                len(chunks),
-                gen_time,
-                wav_f32.size / float(sample_rate),
-            )
-            yield pcm16.tobytes()
+                    if wav_f32.size > emitted_samples:
+                        delta = wav_f32[emitted_samples:]
+                        emitted_samples = wav_f32.size
+                        pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
+                        if pcm16.size > 0:
+                            yield pcm16.tobytes()
+
+                if done and decoded_frames >= len(frame_buffer):
+                    break
+                if not had_event:
+                    await asyncio.sleep(STREAM_POLL_SECONDS)
+
+            await generation_future
 
 
 async def index_handler(request: web.Request):

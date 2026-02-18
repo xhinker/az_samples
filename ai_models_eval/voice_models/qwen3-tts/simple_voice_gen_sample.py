@@ -132,8 +132,8 @@ ref_audio_embedding = model.create_voice_clone_prompt(
 
 #%%
 text_to_speak = """
-	This is a streaming test using the cloned voice. I should hear the audio almost immediately.
-	Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
+This is a streaming test using the cloned voice. I should hear the audio almost immediately.
+Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
 """
 
 # This qwen_tts wrapper does not expose true audio-token streaming in Python.

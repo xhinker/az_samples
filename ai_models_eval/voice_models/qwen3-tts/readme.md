@@ -52,4 +52,5 @@ http://127.0.0.1:8080
 
 - The backend streams `pcm16le` bytes over HTTP chunked response.
 - Browser playback uses Web Audio API scheduling for low-latency continuous audio.
-- Stream generation is implemented as incremental text-chunk generation for compatibility with public `qwen_tts` APIs.
+- Stream generation now uses internal code-token streaming hooks (CloudWells-style) instead of text chunking.
+- For stability, one active stream per mode is processed at a time (`custom_voice` and `voice_clone` each have their own lock).
