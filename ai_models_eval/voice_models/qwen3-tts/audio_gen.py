@@ -44,6 +44,10 @@ STREAM_POLL_SECONDS = 0.01
 STREAM_BUFFER_RESET_SECONDS = 30.0
 DEFAULT_DECODE_HOP = 1920
 TEXT_REANCHOR_MAX_WORDS = 90
+TEXT_REANCHOR_TARGET_SECONDS = 30.0
+
+_CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_SPLIT_HINT_CHARS = " ,;，；。！？!?、"
 
 
 class StopEventCriteria(StoppingCriteria):
@@ -65,29 +69,81 @@ def split_text_for_reanchor(text: str, max_words: int = TEXT_REANCHOR_MAX_WORDS)
 
     sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", clean) if s]
     segments: list[str] = []
-    current_words: list[str] = []
+
+    def estimate_seconds(piece: str) -> float:
+        normalized = " ".join(piece.strip().split())
+        if not normalized:
+            return 0.0
+        non_space_chars = len(normalized.replace(" ", ""))
+        words = len(normalized.split())
+        cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
+        if cjk_chars >= max(8, int(non_space_chars * 0.20)):
+            # CJK speech is better approximated by character count.
+            return (cjk_chars / 5.5) + ((non_space_chars - cjk_chars) / 14.0)
+        return max(words / 2.8, non_space_chars / 15.0)
+
+    def split_oversized_piece(piece: str) -> list[str]:
+        normalized = " ".join(piece.strip().split())
+        if not normalized:
+            return []
+        if estimate_seconds(normalized) <= TEXT_REANCHOR_TARGET_SECONDS:
+            return [normalized]
+
+        non_space_chars = len(normalized.replace(" ", ""))
+        cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
+        is_cjk_heavy = cjk_chars >= max(8, int(non_space_chars * 0.20))
+        chars_per_second = 6 if is_cjk_heavy else 15
+        window = max(80, int(TEXT_REANCHOR_TARGET_SECONDS * chars_per_second))
+
+        parts: list[str] = []
+        start = 0
+        text_len = len(normalized)
+        while start < text_len:
+            end = min(text_len, start + window)
+            if end < text_len:
+                cut = -1
+                scan_start = max(start + int(window * 0.5), start + 1)
+                for idx in range(end, scan_start - 1, -1):
+                    if normalized[idx - 1] in _SPLIT_HINT_CHARS:
+                        cut = idx
+                        break
+                if cut == -1:
+                    cut = end
+            else:
+                cut = end
+            part = normalized[start:cut].strip()
+            if part:
+                parts.append(part)
+            start = cut
+        return parts
+
+    current = ""
 
     def flush_current():
-        if current_words:
-            segments.append(" ".join(current_words))
-            current_words.clear()
+        nonlocal current
+        if current:
+            segments.append(current)
+            current = ""
 
     for sentence in sentences:
-        words = sentence.split()
-        if not words:
-            continue
-        if len(words) > max_words:
-            flush_current()
-            start = 0
-            while start < len(words):
-                part = words[start:start + max_words]
-                segments.append(" ".join(part))
-                start += max_words
-            continue
+        for piece in split_oversized_piece(sentence):
+            words = len(piece.split())
+            if words > max_words:
+                flush_current()
+                start = 0
+                word_list = piece.split()
+                while start < len(word_list):
+                    part_words = word_list[start:start + max_words]
+                    segments.append(" ".join(part_words))
+                    start += max_words
+                continue
 
-        if len(current_words) + len(words) > max_words:
-            flush_current()
-        current_words.extend(words)
+            candidate = piece if not current else f"{current} {piece}"
+            if current and estimate_seconds(candidate) > TEXT_REANCHOR_TARGET_SECONDS:
+                flush_current()
+                current = piece
+            else:
+                current = candidate
 
     flush_current()
     return segments if segments else [clean]
@@ -465,7 +521,6 @@ class QwenStreamingService:
                         if frame.numel() == 0:
                             return
                         if int(frame[0, 0].item()) == eos_token_id:
-                            stop_event.set()
                             events.put(("eos", None))
                             return
                         events.put(("frame", frame.contiguous()))
@@ -766,7 +821,6 @@ class QwenStreamingService:
                 if not had_event:
                     await asyncio.sleep(STREAM_POLL_SECONDS)
         finally:
-            stop_event.set()
             try:
                 await asyncio.wait_for(generation_future, timeout=5.0)
             except asyncio.TimeoutError:
