@@ -254,21 +254,53 @@ class RealtimeTTSRuntime:
             raise FileNotFoundError(f"Reference audio not found: {file_name}")
         return candidate
 
-    def _encode_reference_audio_tokens(self, audio_path: Path) -> np.ndarray:
+    def _load_reference_waveform(self, audio_path: Path) -> torch.Tensor:
+        wav_np: Optional[np.ndarray] = None
+        sr: Optional[int] = None
+        load_errors: list[str] = []
+
         try:
-            import torchaudio
+            import soundfile as sf
+
+            raw, sr = sf.read(str(audio_path), dtype="float32", always_2d=False)
+            wav_np = np.asarray(raw, dtype=np.float32)
+            if wav_np.ndim == 2:
+                wav_np = wav_np.mean(axis=1)
         except Exception as exc:
-            raise RuntimeError("torchaudio is required for reference audio support.") from exc
+            load_errors.append(f"soundfile: {exc}")
 
-        wav, sr = torchaudio.load(str(audio_path))
+        if wav_np is None or sr is None:
+            try:
+                import librosa
+
+                wav_np, sr = librosa.load(str(audio_path), sr=None, mono=True)
+                wav_np = np.asarray(wav_np, dtype=np.float32)
+            except Exception as exc:
+                load_errors.append(f"librosa: {exc}")
+                details = "; ".join(load_errors)
+                raise RuntimeError(f"Failed to load reference audio '{audio_path.name}'. {details}") from exc
+
         if sr != SAMPLE_RATE:
-            wav = torchaudio.functional.resample(wav, sr, SAMPLE_RATE)
-        if wav.shape[0] > 1:
-            wav = wav.mean(dim=0, keepdim=True)
-        if wav.dim() == 2:
-            wav = wav.unsqueeze(0)
+            try:
+                import librosa
 
-        wav = wav.to(self.device)
+                wav_np = librosa.resample(wav_np, orig_sr=sr, target_sr=SAMPLE_RATE)
+            except Exception:
+                from scipy import signal
+
+                gcd = np.gcd(sr, SAMPLE_RATE)
+                wav_np = signal.resample_poly(wav_np, SAMPLE_RATE // gcd, sr // gcd)
+            wav_np = np.asarray(wav_np, dtype=np.float32)
+
+        if wav_np.ndim != 1:
+            wav_np = wav_np.reshape(-1)
+
+        wav = torch.from_numpy(np.ascontiguousarray(wav_np)).unsqueeze(0).unsqueeze(0)
+        return wav.to(self.device)
+
+    def _encode_reference_audio_tokens(self, audio_path: Path) -> np.ndarray:
+        wav = self._load_reference_waveform(audio_path)
+
         with torch.inference_mode():
             # Reference prompt is timbre conditioning; do not use tiny streaming chunks here.
             encode_result = self.codec.encode(wav)
