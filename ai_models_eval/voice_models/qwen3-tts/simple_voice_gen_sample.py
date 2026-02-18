@@ -105,3 +105,60 @@ wavs, sr = model.generate_voice_clone(
     , voice_clone_prompt    = ref_audio_embedding
 )
 sf.write("outputs/output_voice_clone.wav", wavs[0], sr)
+
+#%% audio streaming
+import numpy as np
+import torch
+from IPython.display import Audio, display, clear_output
+from qwen_tts import Qwen3TTSModel
+
+model = Qwen3TTSModel.from_pretrained(
+    "models/tts_hf_models/Qwen/Qwen3-TTS-12Hz-1.7B-Base_main"
+    , device_map            = "cuda:0"
+    , dtype                 = torch.bfloat16
+    , attn_implementation   = "flash_attention_2"
+)
+
+#%%
+# 1. Your existing setup
+ref_audio = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/outputs/output_custom_voice_en.wav"
+ref_text  = "Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions."
+
+# Prepare the embedding (reusable across multiple generations)
+ref_audio_embedding = model.create_voice_clone_prompt(
+    ref_audio=ref_audio,
+    ref_text=ref_text,
+    x_vector_only_mode=False
+)
+
+#%%
+# 2. Streaming Generation
+text_to_speak = """
+This is a streaming test using the cloned voice. I should hear the audio almost immediately.
+Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
+"""
+sample_rate = 24000 
+
+# Initialize the generator
+# streaming=True triggers the 12.5Hz multi-codebook streaming logic
+audio_generator = model.generate_voice_clone(
+    text=text_to_speak,
+    voice_clone_prompt=ref_audio_embedding,
+    streaming=True,
+    language="auto"  # Specify the target language
+)
+
+print("Starting stream...")
+
+for chunk in audio_generator:
+    # 1. Convert the list to a NumPy array first
+    # This fixes the AttributeError
+    audio_array = np.array(chunk, dtype=np.float32)
+    
+    # 2. Flatten and prepare for browser playback
+    audio_float = audio_array.flatten()
+    
+    # 3. Send over SSH to VS Code Interactive on Mac
+    # Check if audio_float has data before displaying
+    if audio_float.size > 0:
+        display(Audio(audio_float, rate=sample_rate, autoplay=True))
