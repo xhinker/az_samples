@@ -61,7 +61,10 @@ http://127.0.0.1:8080
 - [ ] Leverage audio_gen.py to live stream the output from a LLM model. here is the implementation details: 
 1. Create another web page app using pure HTML, CSS and Javascript for LLM chat
 2. Reuse the web server called llm_audio_server.py as the backend host, using aiohttp, use port 8085. 
-3. The LLM API detail:
+3. Use Qwen3-TTS Base model so that can clone audio
+    The Audio file:/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/cosyvoice2/samples/Zh_7_prompt.wav
+    The reference Audio text: "今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。"
+4. The LLM API detail:
     ```json
     {
         "api_name":"macm4max_lmstudio",
@@ -70,5 +73,5 @@ http://127.0.0.1:8080
         "model_name":"qwen/qwen3-coder-next"
     }
     ```
-4. In the UI, provide a predefined system prompt to tell LLM to output text that will be read out, and make the system prompt editable so that user can provide customized prompt.
-5. In the UI, while text streaming out, also stream the live audio
+5. In the UI, provide a predefined system prompt to tell LLM to output text that will be read out, and make the system prompt editable so that user can provide customized prompt.
+6. In the UI, while text streaming out, also stream the live audio

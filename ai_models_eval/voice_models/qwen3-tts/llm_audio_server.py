@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 import aiohttp
-from aiohttp import WSMsgType, web
+from aiohttp import ClientConnectionError, WSMsgType, web
 
 try:
     from .audio_gen import (
@@ -208,6 +208,7 @@ async def index_handler(request: web.Request) -> web.FileResponse:
 async def health_handler(request: web.Request) -> web.Response:
     service: QwenStreamingService = request.app["service"]
     llm_client: LMStudioStreamingClient = request.app["llm_client"]
+    ref_configured = request.app.get("ref_audio_bytes") is not None
     return web.json_response(
         {
             "status": "ok",
@@ -220,6 +221,8 @@ async def health_handler(request: web.Request) -> web.Response:
                 "custom_voice": "custom_voice" in service._models,
                 "voice_clone": "voice_clone" in service._models,
             },
+            "ref_audio_configured": ref_configured,
+            "default_mode": "voice_clone" if ref_configured else "custom_voice",
         }
     )
 
@@ -267,8 +270,9 @@ async def chat_ws_handler(request: web.Request) -> web.WebSocketResponse:
     llm_client: LMStudioStreamingClient = request.app["llm_client"]
 
     stop_event = threading.Event()
-    mode = "custom_voice"
-    service.register_active_stream(mode, stop_event)
+    mode = "custom_voice"          # resolved from payload below
+    ref_audio_bytes: Optional[bytes] = None
+    ref_text: str = ""
 
     llm_done = asyncio.Event()
     text_queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
@@ -312,8 +316,37 @@ async def chat_ws_handler(request: web.Request) -> web.WebSocketResponse:
         temperature = _coerce_float(payload.get("temperature"), default=0.7, low=0.0, high=2.0)
         max_tokens = _coerce_int(payload.get("max_tokens"), default=1024, low=64, high=4096)
 
+        # Resolve TTS mode and reference audio for voice cloning.
+        server_ref_bytes: Optional[bytes] = request.app.get("ref_audio_bytes")
+        server_ref_text: str = str(request.app.get("ref_text") or "")
+        default_mode = "voice_clone" if server_ref_bytes else "custom_voice"
+        req_mode = str(payload.get("mode") or default_mode).strip()
+        mode = req_mode if req_mode in ("custom_voice", "voice_clone") else default_mode
+
+        if mode == "voice_clone":
+            client_ref_b64 = payload.get("reference_audio_b64")
+            if client_ref_b64:
+                try:
+                    ref_audio_bytes = base64.b64decode(client_ref_b64)
+                    ref_text = str(payload.get("reference_text") or "").strip()
+                except Exception:
+                    await _safe_send_json(ws, {"type": "error", "message": "Invalid reference_audio_b64 encoding."})
+                    return ws
+            elif server_ref_bytes:
+                ref_audio_bytes = server_ref_bytes
+                ref_text = server_ref_text
+            else:
+                await _safe_send_json(ws, {"type": "error", "message": (
+                    "voice_clone mode requires reference audio. "
+                    "Start the server with --ref-audio, or send reference_audio_b64 in the request."
+                )})
+                return ws
+
+        service.register_active_stream(mode, stop_event)
+
         model = await service.ensure_model(mode)
-        speaker = service.normalize_speaker(speaker, model)
+        if mode == "custom_voice":
+            speaker = service.normalize_speaker(speaker, model)
         sample_rate = service.sampling_rate_for_mode(mode)
 
         await _safe_send_json(
@@ -382,8 +415,8 @@ async def chat_ws_handler(request: web.Request) -> web.WebSocketResponse:
                         language=language,
                         speaker=speaker,
                         instruction=instruction,
-                        reference_audio_bytes=None,
-                        reference_text="",
+                        reference_audio_bytes=ref_audio_bytes,
+                        reference_text=ref_text,
                     )
                     stream_iter = service.stream_pcm16(params=params, stop_event=stop_event)
                     async for pcm_chunk in stream_iter:
@@ -476,13 +509,17 @@ def build_app(
     llm_api_url: str,
     llm_api_key: str,
     llm_model_name: str,
+    ref_audio_bytes: Optional[bytes] = None,
+    ref_text: str = "",
 ) -> web.Application:
     static_dir = Path(__file__).parent / "static_llm_chat"
     if not static_dir.exists():
         raise FileNotFoundError(f"Static directory not found: {static_dir}")
 
-    app = web.Application(client_max_size=4 * 1024 * 1024)
+    app = web.Application(client_max_size=8 * 1024 * 1024)
     app["static_dir"] = str(static_dir)
+    app["ref_audio_bytes"] = ref_audio_bytes
+    app["ref_text"] = ref_text
     app["service"] = QwenStreamingService(
         custom_model_id=custom_model_id,
         voice_clone_model_id=voice_clone_model_id,
@@ -547,11 +584,34 @@ def parse_args() -> argparse.Namespace:
         "--llm-model-name",
         default=os.environ.get("LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME),
     )
+    parser.add_argument(
+        "--ref-audio",
+        default=os.environ.get("TTS_REF_AUDIO", ""),
+        help="Path to a WAV file used as the voice clone reference audio.",
+    )
+    parser.add_argument(
+        "--ref-text",
+        default=os.environ.get("TTS_REF_TEXT", ""),
+        help="Transcript matching the reference audio (required for voice cloning).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    ref_audio_bytes: Optional[bytes] = None
+    ref_text: str = args.ref_text
+    if args.ref_audio:
+        ref_path = Path(args.ref_audio)
+        if not ref_path.exists():
+            logger.error("Reference audio file not found: %s", ref_path)
+        else:
+            ref_audio_bytes = ref_path.read_bytes()
+            logger.info(
+                "Loaded reference audio: %s (%d bytes)", ref_path, len(ref_audio_bytes)
+            )
+
     app = build_app(
         custom_model_id=args.custom_model_id,
         voice_clone_model_id=args.voice_clone_model_id,
@@ -562,6 +622,8 @@ def main() -> None:
         llm_api_url=args.llm_api_url,
         llm_api_key=args.llm_api_key,
         llm_model_name=args.llm_model_name,
+        ref_audio_bytes=ref_audio_bytes,
+        ref_text=ref_text,
     )
     web.run_app(app, host=args.host, port=args.port)
 

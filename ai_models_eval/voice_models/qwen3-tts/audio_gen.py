@@ -333,8 +333,26 @@ class QwenStreamingService:
             return model
 
     def _load_model_blocking(self, model_id: str):
+        device = self.device
+        # Qwen3-TTS uses a custom talker generate that does not support tensors
+        # being split across multiple CUDA devices.  When device_map="auto" is
+        # requested and more than one GPU is visible, pin the whole model to
+        # cuda:0 so all tensors stay on a single device.
+        if (
+            device == "auto"
+            and torch is not None
+            and torch.cuda.is_available()
+            and torch.cuda.device_count() > 1
+        ):
+            device = "cuda:0"
+            logger.info(
+                "Multiple CUDA devices detected (%d GPUs). Pinning TTS model to cuda:0 "
+                "to avoid cross-device tensor errors. Use --device to override.",
+                torch.cuda.device_count(),
+            )
+
         kwargs = {
-            "device_map": self.device,
+            "device_map": device,
         }
         if self.dtype is not None:
             kwargs["dtype"] = self.dtype

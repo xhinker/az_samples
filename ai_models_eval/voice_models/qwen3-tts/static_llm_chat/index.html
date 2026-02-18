@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LLM Audio Chat</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #0f1117;
+      --surface:     #1a1d27;
+      --surface2:    #22263a;
+      --border:      #2e3347;
+      --accent:      #6c7cf7;
+      --accent-dim:  #3d4880;
+      --text:        #e2e4f0;
+      --text-dim:    #7a7f99;
+      --green:       #3ecf8e;
+      --red:         #f56565;
+      --user-bubble: #1e3a5f;
+      --ai-bubble:   #1f2035;
+      --radius:      12px;
+    }
+
+    html, body { height: 100%; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 20px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    header h1 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: .4px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    header h1 span.icon { font-size: 1.3rem; }
+
+    #status-badge {
+      font-size: .75rem;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      background: var(--accent-dim);
+      color: var(--text);
+      transition: background .3s;
+    }
+    #status-badge.active  { background: var(--accent); }
+    #status-badge.error   { background: var(--red); }
+    #status-badge.playing { background: var(--green); }
+
+    /* ── Body layout ── */
+    .layout {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* ── Settings sidebar ── */
+    aside {
+      width: 280px;
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      gap: 14px;
+      overflow-y: auto;
+    }
+    aside h2 {
+      font-size: .8rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      font-weight: 600;
+    }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      font-size: .8rem;
+      color: var(--text-dim);
+    }
+    label span { font-weight: 600; color: var(--text); }
+
+    textarea, input[type="text"], input[type="number"], select {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font-size: .85rem;
+      font-family: inherit;
+      padding: 8px 10px;
+      outline: none;
+      transition: border-color .2s;
+      width: 100%;
+    }
+    textarea:focus, input:focus, select:focus {
+      border-color: var(--accent);
+    }
+    textarea#system-prompt {
+      resize: vertical;
+      min-height: 130px;
+      line-height: 1.5;
+    }
+
+    .row { display: flex; gap: 8px; }
+    .row label { flex: 1; }
+
+    /* Audio controls */
+    #audio-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .audio-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .8rem;
+      color: var(--text-dim);
+    }
+    .audio-row input[type="range"] {
+      flex: 1;
+      accent-color: var(--accent);
+      padding: 0;
+      border: none;
+      background: transparent;
+    }
+
+    /* Voice mode section */
+    .mode-radio-group { display: flex; flex-direction: column; gap: 6px; }
+    .mode-radio-label {
+      display: flex;
+      flex-direction: row !important;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .mode-radio-label input[type="radio"] { accent-color: var(--accent); width: 14px; height: 14px; }
+
+    #voice-clone-settings {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 10px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    #server-ref-status {
+      font-size: .75rem;
+      padding: 5px 10px;
+      border-radius: 6px;
+      background: var(--bg);
+      color: var(--text-dim);
+    }
+    #server-ref-status.ok { color: var(--green); }
+
+    input[type="file"] { cursor: pointer; font-size: .8rem; color: var(--text-dim); }
+    input[type="file"]::file-selector-button {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      cursor: pointer;
+      font-size: .78rem;
+      padding: 4px 10px;
+      margin-right: 8px;
+      transition: border-color .2s;
+    }
+    input[type="file"]::file-selector-button:hover { border-color: var(--accent); }
+    #audio-indicator {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 20px;
+    }
+    .bar {
+      width: 4px;
+      border-radius: 2px;
+      background: var(--accent);
+      animation: none;
+      height: 4px;
+      transition: height .1s;
+    }
+    .bar.animate { animation: bounce var(--d, .6s) ease-in-out infinite alternate; }
+    @keyframes bounce {
+      from { height: 4px; }
+      to   { height: 18px; }
+    }
+
+    /* ── Chat area ── */
+    .chat-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      scroll-behavior: smooth;
+    }
+
+    .msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 80%;
+    }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.ai   { align-self: flex-start; align-items: flex-start; }
+
+    .bubble {
+      padding: 11px 15px;
+      border-radius: var(--radius);
+      line-height: 1.6;
+      font-size: .9rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--user-bubble);
+      border-bottom-right-radius: 3px;
+    }
+    .msg.ai .bubble {
+      background: var(--ai-bubble);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 3px;
+    }
+    .msg-meta {
+      font-size: .7rem;
+      color: var(--text-dim);
+      margin-top: 4px;
+      padding: 0 4px;
+    }
+
+    /* Typing cursor */
+    .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background: var(--accent);
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: blink 1s step-end infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    /* ── Input bar ── */
+    .input-bar {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: 14px 20px;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    #user-input {
+      flex: 1;
+      resize: none;
+      min-height: 44px;
+      max-height: 140px;
+      overflow-y: auto;
+      padding: 10px 14px;
+      font-size: .9rem;
+      border-radius: var(--radius);
+    }
+    button {
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: .85rem;
+      font-weight: 600;
+      padding: 10px 18px;
+      transition: background .2s, opacity .2s;
+    }
+    #send-btn {
+      background: var(--accent);
+      color: #fff;
+      white-space: nowrap;
+      align-self: flex-end;
+      height: 44px;
+    }
+    #send-btn:hover { opacity: .85; }
+    #send-btn:disabled { background: var(--accent-dim); cursor: not-allowed; }
+
+    #stop-btn {
+      background: var(--red);
+      color: #fff;
+      display: none;
+      align-self: flex-end;
+      height: 44px;
+    }
+    #stop-btn:hover { opacity: .85; }
+    #stop-btn.visible { display: block; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1><span class="icon">🎙</span> LLM Audio Chat</h1>
+  <span id="status-badge">Idle</span>
+</header>
+
+<div class="layout">
+  <!-- Sidebar -->
+  <aside>
+    <h2>Settings</h2>
+
+    <label>
+      <span>System Prompt</span>
+      <textarea id="system-prompt">You are a concise assistant. Respond with plain spoken text only, without markdown, code fences, bullet lists, XML tags, JSON, or emojis. Write naturally so the response can be read aloud by TTS.</textarea>
+    </label>
+
+    <div class="row">
+      <label>
+        <span>Temperature</span>
+        <input type="number" id="temperature" value="0.7" min="0" max="2" step="0.05" />
+      </label>
+      <label>
+        <span>Max tokens</span>
+        <input type="number" id="max-tokens" value="1024" min="64" max="4096" step="64" />
+      </label>
+    </div>
+
+    <label>
+      <span>TTS Speaker</span>
+      <input type="text" id="speaker" value="vivian" placeholder="e.g. vivian" />
+    </label>
+
+    <label>
+      <span>Language</span>
+      <select id="language">
+        <option value="Auto" selected>Auto</option>
+        <option value="English">English</option>
+        <option value="Chinese">Chinese</option>
+        <option value="Japanese">Japanese</option>
+        <option value="Korean">Korean</option>
+        <option value="French">French</option>
+        <option value="German">German</option>
+        <option value="Spanish">Spanish</option>
+      </select>
+    </label>
+
+    <label>
+      <span>TTS Instruction (optional)</span>
+      <input type="text" id="instruction" placeholder="e.g. Speak slowly and clearly" />
+    </label>
+
+    <h2>Voice Mode</h2>
+    <div class="mode-radio-group">
+      <label class="mode-radio-label">
+        <input type="radio" name="voice-mode" id="mode-custom" value="custom_voice" checked>
+        Custom Voice
+      </label>
+      <label class="mode-radio-label">
+        <input type="radio" name="voice-mode" id="mode-clone" value="voice_clone">
+        Voice Clone
+      </label>
+    </div>
+    <div id="voice-clone-settings">
+      <div id="server-ref-status">Checking server…</div>
+      <label>
+        <span>Ref Audio <span style="font-weight:400;color:var(--text-dim)">(upload to override server default)</span></span>
+        <input type="file" id="ref-audio-file" accept=".wav,.mp3,.ogg,.flac" />
+      </label>
+      <label>
+        <span>Reference Text</span>
+        <textarea id="ref-text" style="min-height:68px;font-size:.8rem">今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。</textarea>
+      </label>
+    </div>
+
+    <h2>Audio</h2>
+    <div id="audio-controls">
+      <div class="audio-row">
+        <span>Volume</span>
+        <input type="range" id="volume" min="0" max="1" step="0.05" value="1" />
+        <span id="volume-label">100%</span>
+      </div>
+      <div id="audio-indicator">
+        <div class="bar" style="--d:.5s"></div>
+        <div class="bar" style="--d:.7s"></div>
+        <div class="bar" style="--d:.4s"></div>
+        <div class="bar" style="--d:.6s"></div>
+        <div class="bar" style="--d:.8s"></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Chat -->
+  <div class="chat-wrap">
+    <div id="chat"></div>
+
+    <div class="input-bar">
+      <textarea id="user-input" placeholder="Type your message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+      <button id="send-btn">Send ▶</button>
+      <button id="stop-btn">Stop ■</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── DOM refs ──────────────────────────────────────────────────────────────
+  const chatEl       = document.getElementById('chat');
+  const inputEl      = document.getElementById('user-input');
+  const sendBtn      = document.getElementById('send-btn');
+  const stopBtn      = document.getElementById('stop-btn');
+  const statusBadge  = document.getElementById('status-badge');
+  const volumeSlider = document.getElementById('volume');
+  const volumeLabel  = document.getElementById('volume-label');
+  const bars         = document.querySelectorAll('#audio-indicator .bar');
+
+  const getSysPrompt   = () => document.getElementById('system-prompt').value.trim();
+  const getTemperature = () => parseFloat(document.getElementById('temperature').value) || 0.7;
+  const getMaxTokens   = () => parseInt(document.getElementById('max-tokens').value, 10) || 1024;
+  const getSpeaker     = () => document.getElementById('speaker').value.trim() || 'vivian';
+  const getLanguage    = () => document.getElementById('language').value;
+  const getInstruction = () => document.getElementById('instruction').value.trim();
+  const getVoiceMode   = () => {
+    const r = document.querySelector('input[name="voice-mode"]:checked');
+    return r ? r.value : 'custom_voice';
+  };
+  const getRefText     = () => (document.getElementById('ref-text') || {value:''}).value.trim();
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  let ws              = null;
+  let audioCtx        = null;
+  let gainNode        = null;
+  let sampleRate      = 24000;
+  let nextPlayTime    = 0;   // next scheduled audio start time
+  let isActive        = false;
+  let aiMsgEl         = null; // current AI message DOM node
+  let aiBubble        = null;
+  let cursorEl        = null;
+  let refAudioBase64  = null; // user-uploaded reference audio (base64)
+  let serverRefOk     = false;
+
+  // ── Audio helpers ─────────────────────────────────────────────────────────
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = parseFloat(volumeSlider.value);
+      gainNode.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function scheduleAudioChunk(pcm16Base64) {
+    ensureAudioCtx();
+    // Decode base64 → ArrayBuffer → Int16Array
+    const raw  = atob(pcm16Base64);
+    const buf  = new ArrayBuffer(raw.length);
+    const view = new Uint8Array(buf);
+    for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
+
+    const int16 = new Int16Array(buf);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+    const audioBuf = audioCtx.createBuffer(1, float32.length, sampleRate);
+    audioBuf.copyToChannel(float32, 0);
+
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuf;
+    source.connect(gainNode);
+
+    // Schedule slightly ahead of current time if we've fallen behind
+    const startAt = Math.max(audioCtx.currentTime + 0.06, nextPlayTime);
+    source.start(startAt);
+    nextPlayTime = startAt + audioBuf.duration;
+  }
+
+  function startAudioIndicator() {
+    bars.forEach(b => b.classList.add('animate'));
+  }
+
+  function stopAudioIndicator() {
+    bars.forEach(b => b.classList.remove('animate'));
+  }
+
+  // ── Health check & voice-mode init ───────────────────────────────────────
+  (async function checkHealth() {
+    try {
+      const res = await fetch('/api/health');
+      const data = await res.json();
+      serverRefOk = !!data.ref_audio_configured;
+      const statusEl = document.getElementById('server-ref-status');
+      if (statusEl) {
+        if (serverRefOk) {
+          statusEl.textContent = 'Server ref audio: configured ✓';
+          statusEl.classList.add('ok');
+        } else {
+          statusEl.textContent = 'Server ref audio: not configured — upload required';
+        }
+      }
+      // Auto-select voice_clone when server defaults to it
+      if (data.default_mode === 'voice_clone') {
+        const cloneRadio = document.getElementById('mode-clone');
+        if (cloneRadio) {
+          cloneRadio.checked = true;
+          const vcEl = document.getElementById('voice-clone-settings');
+          if (vcEl) vcEl.style.display = 'flex';
+        }
+      }
+    } catch (e) {
+      console.warn('Health check failed:', e);
+    }
+  })();
+
+  // ── Voice mode toggle ─────────────────────────────────────────────────────
+  document.querySelectorAll('input[name="voice-mode"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const vcEl = document.getElementById('voice-clone-settings');
+      if (vcEl) vcEl.style.display = (getVoiceMode() === 'voice_clone') ? 'flex' : 'none';
+    });
+  });
+
+  // ── Ref audio file reader ─────────────────────────────────────────────────
+  const refFileInput = document.getElementById('ref-audio-file');
+  if (refFileInput) {
+    refFileInput.addEventListener('change', () => {
+      const file = refFileInput.files[0];
+      if (!file) { refAudioBase64 = null; return; }
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const bytes = new Uint8Array(ev.target.result);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        refAudioBase64 = btoa(binary);
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  // ── Volume ────────────────────────────────────────────────────────────────
+  volumeSlider.addEventListener('input', () => {
+    const v = parseFloat(volumeSlider.value);
+    volumeLabel.textContent = Math.round(v * 100) + '%';
+    if (gainNode) gainNode.gain.value = v;
+  });
+
+  // ── Status badge ──────────────────────────────────────────────────────────
+  function setStatus(text, cls = '') {
+    statusBadge.textContent = text;
+    statusBadge.className   = cls;
+  }
+
+  // ── Chat UI ───────────────────────────────────────────────────────────────
+  function appendUserMsg(text) {
+    const div = document.createElement('div');
+    div.className = 'msg user';
+    div.innerHTML = `<div class="bubble">${escHtml(text)}</div><div class="msg-meta">${nowStr()}</div>`;
+    chatEl.appendChild(div);
+    scrollToBottom();
+  }
+
+  function createAiMsg() {
+    aiMsgEl = document.createElement('div');
+    aiMsgEl.className = 'msg ai';
+    aiBubble = document.createElement('div');
+    aiBubble.className = 'bubble';
+    cursorEl = document.createElement('span');
+    cursorEl.className = 'cursor';
+    aiBubble.appendChild(cursorEl);
+    aiMsgEl.appendChild(aiBubble);
+    chatEl.appendChild(aiMsgEl);
+    scrollToBottom();
+  }
+
+  function appendAiDelta(delta) {
+    if (!aiBubble) return;
+    const text = document.createTextNode(delta);
+    aiBubble.insertBefore(text, cursorEl);
+    scrollToBottom();
+  }
+
+  function finalizeAiMsg(fullText) {
+    if (!aiBubble) return;
+    if (cursorEl) cursorEl.remove();
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = nowStr();
+    aiMsgEl.appendChild(meta);
+    aiMsgEl = null;
+    aiBubble = null;
+    cursorEl = null;
+  }
+
+  function scrollToBottom() {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function nowStr() {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function appendSystemMsg(text, isError = false) {
+    const div = document.createElement('div');
+    div.style.cssText = `align-self:center;font-size:.75rem;color:${isError?'var(--red)':'var(--text-dim)'};padding:4px 10px;`;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    scrollToBottom();
+  }
+
+  // ── UI state helpers ──────────────────────────────────────────────────────
+  function setActiveUI(active) {
+    isActive      = active;
+    sendBtn.disabled = active;
+    stopBtn.classList.toggle('visible', active);
+    inputEl.disabled = active;
+    if (!active) {
+      stopAudioIndicator();
+      setStatus('Idle', '');
+    }
+  }
+
+  // ── Send ──────────────────────────────────────────────────────────────────
+  function send() {
+    const userText = inputEl.value.trim();
+    if (!userText || isActive) return;
+
+    inputEl.value = '';
+    autoResize();
+    appendUserMsg(userText);
+    createAiMsg();
+    setStatus('Connecting…', 'active');
+    setActiveUI(true);
+    nextPlayTime = 0;
+
+    const wsUrl = `ws://${location.host}/ws/chat`;
+    ws = new WebSocket(wsUrl);
+
+    ws.addEventListener('open', () => {
+      setStatus('Streaming…', 'active');
+      const mode = getVoiceMode();
+      const wsPayload = {
+        user_message:  userText,
+        system_prompt: getSysPrompt(),
+        mode,
+        temperature:   getTemperature(),
+        max_tokens:    getMaxTokens(),
+        speaker:       getSpeaker(),
+        language:      getLanguage(),
+        instruction:   getInstruction(),
+      };
+      if (mode === 'voice_clone') {
+        if (refAudioBase64) {
+          wsPayload.reference_audio_b64 = refAudioBase64;
+          wsPayload.reference_text = getRefText();
+        }
+        // Otherwise the server uses its pre-configured reference audio.
+      }
+      ws.send(JSON.stringify(wsPayload));
+    });
+
+    ws.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+
+      switch (msg.type) {
+        case 'status':
+          sampleRate = msg.sample_rate || 24000;
+          setStatus('Streaming…', 'active');
+          break;
+
+        case 'audio_meta':
+          sampleRate = msg.sample_rate || 24000;
+          ensureAudioCtx();
+          break;
+
+        case 'text_delta':
+          appendAiDelta(msg.delta || '');
+          break;
+
+        case 'audio_chunk':
+          if (msg.pcm16_b64) {
+            startAudioIndicator();
+            setStatus('Playing…', 'playing');
+            scheduleAudioChunk(msg.pcm16_b64);
+          }
+          break;
+
+        case 'llm_done':
+          setStatus('Audio streaming…', 'active');
+          break;
+
+        case 'audio_done':
+          stopAudioIndicator();
+          break;
+
+        case 'done':
+          finalizeAiMsg(msg.assistant_text || '');
+          setStatus('Done', '');
+          setActiveUI(false);
+          ws = null;
+          break;
+
+        case 'error':
+          appendSystemMsg('Error: ' + (msg.message || 'Unknown error'), true);
+          finalizeAiMsg('');
+          setStatus('Error', 'error');
+          setActiveUI(false);
+          ws = null;
+          break;
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      if (isActive) {
+        finalizeAiMsg('');
+        setStatus('Disconnected', 'error');
+        setActiveUI(false);
+      }
+      ws = null;
+    });
+
+    ws.addEventListener('error', () => {
+      appendSystemMsg('WebSocket connection error.', true);
+      finalizeAiMsg('');
+      setStatus('Error', 'error');
+      setActiveUI(false);
+      ws = null;
+    });
+  }
+
+  // ── Stop ──────────────────────────────────────────────────────────────────
+  stopBtn.addEventListener('click', () => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'stop' }));
+    }
+    if (audioCtx) {
+      // Disconnect gain to silence immediately, then reconnect
+      gainNode.disconnect();
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = parseFloat(volumeSlider.value);
+      gainNode.connect(audioCtx.destination);
+      nextPlayTime = 0;
+    }
+    stopAudioIndicator();
+    appendSystemMsg('Stopped by user.');
+    finalizeAiMsg('');
+    setStatus('Stopped', '');
+    setActiveUI(false);
+  });
+
+  // ── Input auto-resize & keyboard ─────────────────────────────────────────
+  function autoResize() {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  }
+  inputEl.addEventListener('input', autoResize);
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+
+  sendBtn.addEventListener('click', send);
+
+  // Initial focus
+  inputEl.focus();
+})();
+</script>
+</body>
+</html>
