@@ -46,6 +46,9 @@ DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
 STREAM_DECODE_EVERY_FRAMES = 6
 STREAM_POLL_SECONDS = 0.01
+STREAM_LOOKBACK_FRAMES = 16
+STREAM_MAX_DECODE_FRAMES = 160
+DEFAULT_DECODE_HOP = 1920
 
 
 class StopEventCriteria(StoppingCriteria):
@@ -108,6 +111,7 @@ class QwenStreamingService:
         self.attn_implementation = attn_implementation
         self._models: dict[str, object] = {}
         self._sampling_rates: dict[str, int] = {}
+        self._decode_hops: dict[str, int] = {}
         self._locks: dict[str, asyncio.Lock] = {
             "custom_voice": asyncio.Lock(),
             "voice_clone": asyncio.Lock(),
@@ -129,6 +133,9 @@ class QwenStreamingService:
 
     def sampling_rate_for_mode(self, mode: str) -> int:
         return int(self._sampling_rates.get(mode, 24000))
+
+    def decode_hop_for_mode(self, mode: str) -> int:
+        return int(self._decode_hops.get(mode, DEFAULT_DECODE_HOP))
 
     def register_active_stream(self, mode: str, stop_event: threading.Event) -> None:
         with self._active_stop_events_lock:
@@ -210,13 +217,24 @@ class QwenStreamingService:
             model_id = self._model_id_for_mode(mode)
             model = await loop.run_in_executor(None, self._load_model_blocking, model_id)
             sample_rate = int(getattr(model, "sampling_rate", 24000))
+            decode_hop = DEFAULT_DECODE_HOP
+            try:
+                speech_tokenizer = model.model.speech_tokenizer
+                hop_getter = getattr(speech_tokenizer, "get_decode_upsample_rate", None)
+                if callable(hop_getter):
+                    decode_hop = int(hop_getter())
+            except Exception:
+                logger.warning("Could not read decode hop from speech tokenizer, using default %s.", DEFAULT_DECODE_HOP)
+
             self._models[mode] = model
             self._sampling_rates[mode] = sample_rate
+            self._decode_hops[mode] = max(1, decode_hop)
             logger.info(
-                "Loaded %s model: %s (sampling_rate=%s)",
+                "Loaded %s model: %s (sampling_rate=%s, decode_hop=%s)",
                 mode,
                 model_id,
                 sample_rate,
+                self._decode_hops[mode],
             )
             return model
 
@@ -409,13 +427,14 @@ class QwenStreamingService:
         model,
         generated_codes: torch.Tensor,
         ref_code: Optional[torch.Tensor],
+        prepend_ref_code: bool,
     ) -> tuple[np.ndarray, int]:
         if generated_codes.numel() == 0:
             return np.zeros(0, dtype=np.float32), self.sampling_rate_for_mode("voice_clone")
 
         decode_codes = generated_codes
         ref_len = 0
-        if ref_code is not None and ref_code.numel() > 0:
+        if prepend_ref_code and ref_code is not None and ref_code.numel() > 0:
             ref_len = int(ref_code.shape[0])
             decode_codes = torch.cat([ref_code, generated_codes], dim=0)
 
@@ -432,6 +451,7 @@ class QwenStreamingService:
     async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event):
         model = await self.ensure_model(params.mode)
         expected_sr = self.sampling_rate_for_mode(params.mode)
+        decode_hop = self.decode_hop_for_mode(params.mode)
         loop = asyncio.get_running_loop()
         prepared = await loop.run_in_executor(
             None,
@@ -453,8 +473,8 @@ class QwenStreamingService:
                 stop_event,
             )
 
-            emitted_samples = 0
-            decoded_frames = 0
+            decoded_global_frames = 0
+            frame_base_global = 0
             frame_buffer: list[torch.Tensor] = []
             done = False
 
@@ -479,22 +499,40 @@ class QwenStreamingService:
                         elif event == "done":
                             done = True
 
-                    frames_ready = len(frame_buffer) - decoded_frames
+                    end_global = frame_base_global + len(frame_buffer)
+                    frames_ready = end_global - decoded_global_frames
                     should_decode = (
                         frames_ready >= STREAM_DECODE_EVERY_FRAMES
                         or (done and frames_ready > 0)
                     )
 
                     if should_decode:
-                        codes = torch.stack(frame_buffer, dim=0)
+                        start_global = max(
+                            frame_base_global,
+                            end_global - STREAM_MAX_DECODE_FRAMES,
+                            decoded_global_frames - STREAM_LOOKBACK_FRAMES,
+                        )
+                        start_local = start_global - frame_base_global
+                        if start_local < 0:
+                            start_local = 0
+                        codes = torch.stack(frame_buffer[start_local:], dim=0)
+                        prepend_ref_code = start_global == 0
                         wav_f32, sample_rate = await loop.run_in_executor(
                             None,
                             self._decode_codes_to_audio_blocking,
                             model,
                             codes,
                             prepared.ref_code,
+                            prepend_ref_code,
                         )
-                        decoded_frames = len(frame_buffer)
+                        emit_from_frames = max(0, decoded_global_frames - start_global)
+                        emit_from_samples = emit_from_frames * decode_hop
+                        if emit_from_samples < 0:
+                            emit_from_samples = 0
+                        if emit_from_samples > wav_f32.size:
+                            emit_from_samples = wav_f32.size
+                        wav_delta = wav_f32[emit_from_samples:]
+                        decoded_global_frames = end_global
 
                         if sample_rate != expected_sr:
                             logger.warning(
@@ -503,14 +541,22 @@ class QwenStreamingService:
                                 expected_sr,
                             )
 
-                        if wav_f32.size > emitted_samples:
-                            delta = wav_f32[emitted_samples:]
-                            emitted_samples = wav_f32.size
+                        if wav_delta.size > 0:
+                            delta = wav_delta
                             pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
                             if pcm16.size > 0:
                                 yield pcm16.tobytes()
 
-                    if done and decoded_frames >= len(frame_buffer):
+                        keep_from_global = max(
+                            frame_base_global,
+                            decoded_global_frames - STREAM_LOOKBACK_FRAMES,
+                        )
+                        drop = keep_from_global - frame_base_global
+                        if drop > 0:
+                            frame_buffer = frame_buffer[drop:]
+                            frame_base_global = keep_from_global
+
+                    if done and decoded_global_frames >= end_global:
                         break
                     if not had_event:
                         await asyncio.sleep(STREAM_POLL_SECONDS)
