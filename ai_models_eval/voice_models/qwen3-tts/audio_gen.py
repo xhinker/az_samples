@@ -42,6 +42,7 @@ STREAM_DECODE_OVERLAP_FRAMES = 24
 STREAM_MAX_DECODE_FRAMES = 144
 STREAM_POLL_SECONDS = 0.01
 STREAM_BUFFER_RESET_SECONDS = 30.0
+SEGMENT_CROSSFADE_SECONDS = 0.12
 DEFAULT_DECODE_HOP = 1920
 TEXT_REANCHOR_MAX_WORDS = 90
 TEXT_REANCHOR_TARGET_SECONDS = 30.0
@@ -838,6 +839,8 @@ class QwenStreamingService:
 
         stream_lock = self._stream_locks[params.mode]
         async with stream_lock:
+            crossfade_samples = max(0, int(round(expected_sr * SEGMENT_CROSSFADE_SECONDS)))
+            pending_tail = np.zeros(0, dtype=np.int16)
             for idx, segment_text in enumerate(segments, start=1):
                 if stop_event.is_set():
                     break
@@ -859,11 +862,93 @@ class QwenStreamingService:
                 self._attach_stop_criteria(prepared, stop_event)
                 if len(segments) > 1:
                     logger.info("Streaming segment %s/%s", idx, len(segments))
-                async for pcm_chunk in self._stream_prepared_pcm16(
+                is_last_segment = idx == len(segments)
+                keep_samples = crossfade_samples if (crossfade_samples > 0 and not is_last_segment) else 0
+
+                segment_iter = self._stream_prepared_pcm16(
                     model=model,
                     prepared=prepared,
                     expected_sr=expected_sr,
                     decode_hop=self.decode_hop_for_mode(params.mode),
                     stop_event=stop_event,
-                ):
-                    yield pcm_chunk
+                )
+
+                head_remainder = np.zeros(0, dtype=np.int16)
+                prefetched_arrays: list[np.ndarray] = []
+
+                if pending_tail.size > 0 and crossfade_samples > 0:
+                    head = np.zeros(0, dtype=np.int16)
+                    while head.size < crossfade_samples:
+                        try:
+                            chunk = await anext(segment_iter)
+                        except StopAsyncIteration:
+                            break
+                        arr = np.frombuffer(chunk, dtype=np.int16).copy()
+                        if arr.size == 0:
+                            continue
+                        need = crossfade_samples - head.size
+                        take = min(need, arr.size)
+                        if take > 0:
+                            head = np.concatenate([head, arr[:take]])
+                        rest = arr[take:]
+                        if rest.size > 0:
+                            prefetched_arrays.append(rest)
+
+                    if head.size == 0:
+                        if is_last_segment:
+                            yield pending_tail.tobytes()
+                            pending_tail = np.zeros(0, dtype=np.int16)
+                    else:
+                        blend_len = min(pending_tail.size, head.size)
+                        if pending_tail.size > blend_len:
+                            yield pending_tail[:-blend_len].tobytes()
+                        if blend_len > 0:
+                            fade_in = np.linspace(0.0, 1.0, num=blend_len, endpoint=True, dtype=np.float32)
+                            fade_out = 1.0 - fade_in
+                            blended = (
+                                pending_tail[-blend_len:].astype(np.float32) * fade_out
+                                + head[:blend_len].astype(np.float32) * fade_in
+                            )
+                            blended_i16 = np.clip(np.round(blended), -32768, 32767).astype(np.int16)
+                            if blended_i16.size > 0:
+                                yield blended_i16.tobytes()
+                        head_remainder = head[blend_len:]
+                        pending_tail = np.zeros(0, dtype=np.int16)
+
+                holdback = np.zeros(0, dtype=np.int16)
+
+                async def emit_arr(arr: np.ndarray):
+                    nonlocal holdback
+                    if arr.size == 0:
+                        return
+                    combined = arr if holdback.size == 0 else np.concatenate([holdback, arr])
+                    if keep_samples <= 0:
+                        holdback = np.zeros(0, dtype=np.int16)
+                        yield combined.tobytes()
+                        return
+                    if combined.size <= keep_samples:
+                        holdback = combined
+                        return
+                    emit_part = combined[:-keep_samples]
+                    holdback = combined[-keep_samples:]
+                    if emit_part.size > 0:
+                        yield emit_part.tobytes()
+
+                async for out in emit_arr(head_remainder):
+                    yield out
+                for prefetched in prefetched_arrays:
+                    async for out in emit_arr(prefetched):
+                        yield out
+
+                async for pcm_chunk in segment_iter:
+                    arr = np.frombuffer(pcm_chunk, dtype=np.int16).copy()
+                    async for out in emit_arr(arr):
+                        yield out
+
+                if keep_samples > 0:
+                    pending_tail = holdback
+                elif holdback.size > 0:
+                    yield holdback.tobytes()
+
+            if pending_tail.size > 0 and not stop_event.is_set():
+                yield pending_tail.tobytes()
