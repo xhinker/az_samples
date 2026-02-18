@@ -43,7 +43,9 @@ DEFAULT_VOICE_CLONE_MODEL_ID = (
 )
 DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
-WORDS_PER_CHUNK = 16
+WORDS_PER_CHUNK = 12
+SILENCE_TRIM_THRESHOLD = 1e-3
+KEEP_TAIL_SILENCE_SECONDS = 0.08
 
 
 def split_text_for_streaming(text: str, words_per_chunk: int = WORDS_PER_CHUNK) -> list[str]:
@@ -51,7 +53,8 @@ def split_text_for_streaming(text: str, words_per_chunk: int = WORDS_PER_CHUNK) 
     if not clean:
         return []
 
-    sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", clean) if s]
+    # Split on sentence and major clause punctuation to reduce long per-chunk latency.
+    sentences = [s for s in re.split(r"(?<=[.!?。！？,，;；:：])\s+", clean) if s]
     chunks: list[str] = []
     for sentence in sentences:
         words = sentence.split()
@@ -61,6 +64,25 @@ def split_text_for_streaming(text: str, words_per_chunk: int = WORDS_PER_CHUNK) 
         if words:
             chunks.append(" ".join(words))
     return chunks
+
+
+def trim_trailing_silence(
+    wav_f32: np.ndarray,
+    sample_rate: int,
+    threshold: float = SILENCE_TRIM_THRESHOLD,
+    keep_tail_seconds: float = KEEP_TAIL_SILENCE_SECONDS,
+) -> np.ndarray:
+    if wav_f32.size == 0:
+        return wav_f32
+
+    non_silent = np.flatnonzero(np.abs(wav_f32) > threshold)
+    if non_silent.size == 0:
+        return wav_f32
+
+    last_non_silent = int(non_silent[-1])
+    keep_tail_samples = max(1, int(sample_rate * keep_tail_seconds))
+    cut_index = min(wav_f32.size, last_non_silent + 1 + keep_tail_samples)
+    return wav_f32[:cut_index]
 
 
 def _resolve_dtype(dtype_str: str):
@@ -293,6 +315,7 @@ class QwenStreamingService:
                 params.reference_text,
             )
 
+        total_chunks = len(chunks)
         for index, text_chunk in enumerate(chunks, start=1):
             t0 = time.perf_counter()
             loop = asyncio.get_running_loop()
@@ -318,6 +341,9 @@ class QwenStreamingService:
 
             if wav_f32.size == 0:
                 continue
+
+            if index < total_chunks:
+                wav_f32 = trim_trailing_silence(wav_f32, sample_rate)
 
             pcm16 = np.clip(wav_f32 * 32767.0, -32768, 32767).astype(np.int16)
             logger.info(

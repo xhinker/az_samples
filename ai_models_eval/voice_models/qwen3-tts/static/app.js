@@ -10,6 +10,10 @@ let gainNode = null;
 let nextPlaybackTime = 0;
 let activeSources = new Set();
 let controller = null;
+let pcmStash = new Uint8Array(0);
+
+const STARTUP_BUFFER_SEC = 0.9;
+const MIN_SOURCE_SAMPLES = 4096;
 
 function log(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}`;
@@ -26,7 +30,7 @@ function ensureAudioContext(sampleRate) {
     audioContext = new AudioContext({ sampleRate });
     gainNode = audioContext.createGain();
     gainNode.connect(audioContext.destination);
-    nextPlaybackTime = audioContext.currentTime;
+    nextPlaybackTime = audioContext.currentTime + STARTUP_BUFFER_SEC;
   }
   if (audioContext.state === "suspended") {
     return audioContext.resume();
@@ -63,6 +67,25 @@ function enqueuePcmChunk(pcmBytes, sampleRate) {
   source.onended = () => activeSources.delete(source);
 }
 
+function pushPcmBytes(pcmBytes, sampleRate, flushAll = false) {
+  if (pcmBytes && pcmBytes.byteLength > 0) {
+    const merged = new Uint8Array(pcmStash.byteLength + pcmBytes.byteLength);
+    merged.set(pcmStash, 0);
+    merged.set(pcmBytes, pcmStash.byteLength);
+    pcmStash = merged;
+  }
+
+  const minFlushBytes = MIN_SOURCE_SAMPLES * 2;
+  while (pcmStash.byteLength >= minFlushBytes || (flushAll && pcmStash.byteLength >= 2)) {
+    const flushBytes = flushAll
+      ? pcmStash.byteLength - (pcmStash.byteLength % 2)
+      : minFlushBytes;
+    const chunk = pcmStash.slice(0, flushBytes);
+    pcmStash = pcmStash.slice(flushBytes);
+    enqueuePcmChunk(chunk, sampleRate);
+  }
+}
+
 function stopPlayback({ silent = false } = {}) {
   if (controller) {
     controller.abort();
@@ -76,6 +99,7 @@ function stopPlayback({ silent = false } = {}) {
     }
   });
   activeSources.clear();
+  pcmStash = new Uint8Array(0);
   if (audioContext) {
     nextPlaybackTime = audioContext.currentTime;
   }
@@ -109,7 +133,9 @@ async function streamAudio(formData) {
 
   const sampleRate = Number(response.headers.get("x-sample-rate")) || 24000;
   await ensureAudioContext(sampleRate);
-  log(`Streaming started. sample_rate=${sampleRate}`);
+  nextPlaybackTime = audioContext.currentTime + STARTUP_BUFFER_SEC;
+  pcmStash = new Uint8Array(0);
+  log(`Streaming started. sample_rate=${sampleRate}, startup_buffer=${STARTUP_BUFFER_SEC}s`);
 
   const reader = response.body.getReader();
   let carry = new Uint8Array(0);
@@ -135,9 +161,10 @@ async function streamAudio(formData) {
 
     const pcm = merged.slice(0, evenLength);
     carry = merged.slice(evenLength);
-    enqueuePcmChunk(pcm, sampleRate);
+    pushPcmBytes(pcm, sampleRate, false);
   }
 
+  pushPcmBytes(carry, sampleRate, true);
   if (carry.byteLength > 0) {
     log("Dropped trailing odd byte at stream end.");
   }
