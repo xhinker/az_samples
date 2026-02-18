@@ -25,6 +25,17 @@ function updateModeUI() {
   cloneFields.style.display = showClone ? "grid" : "none";
 }
 
+async function requestServerStop(mode = null) {
+  const body = mode ? { mode } : {};
+  const res = await fetch("/api/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    keepalive: true,
+  });
+  return res;
+}
+
 function ensureAudioContext(sampleRate) {
   if (!audioContext) {
     audioContext = new AudioContext({ sampleRate });
@@ -86,7 +97,14 @@ function pushPcmBytes(pcmBytes, sampleRate, flushAll = false) {
   }
 }
 
-function stopPlayback({ silent = false } = {}) {
+async function stopPlayback({ silent = false, notifyServer = true } = {}) {
+  if (notifyServer) {
+    try {
+      await requestServerStop(null);
+    } catch (err) {
+      console.debug("failed to notify server stop", err);
+    }
+  }
   if (controller) {
     controller.abort();
     controller = null;
@@ -171,11 +189,13 @@ async function streamAudio(formData) {
 }
 
 modeEl.addEventListener("change", updateModeUI);
-stopBtn.addEventListener("click", stopPlayback);
+stopBtn.addEventListener("click", async () => {
+  await stopPlayback();
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  stopPlayback({ silent: true });
+  await stopPlayback({ silent: true });
 
   const formData = new FormData(form);
   const mode = formData.get("mode");

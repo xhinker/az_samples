@@ -54,3 +54,4 @@ http://127.0.0.1:8080
 - Browser playback uses Web Audio API scheduling for low-latency continuous audio.
 - Stream generation now uses internal code-token streaming hooks (CloudWells-style) instead of text chunking.
 - For stability, one active stream per mode is processed at a time (`custom_voice` and `voice_clone` each have their own lock).
+- `Stop` sends `/api/stop` to cancel server-side generation (not only client playback).

@@ -7,15 +7,17 @@ import argparse
 import asyncio
 import logging
 import os
+import threading
 import tempfile
 from queue import Empty, Queue
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import numpy as np
 from aiohttp import web
 from aiohttp.web_request import FileField
+from transformers import StoppingCriteria, StoppingCriteriaList
 
 try:
     import torch
@@ -44,6 +46,18 @@ DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
 STREAM_DECODE_EVERY_FRAMES = 6
 STREAM_POLL_SECONDS = 0.01
+
+
+class StopEventCriteria(StoppingCriteria):
+    def __init__(self, stop_event: threading.Event):
+        self.stop_event = stop_event
+
+    def __call__(self, input_ids, scores, **kwargs):
+        return self.stop_event.is_set()
+
+
+class GenerationCancelled(Exception):
+    pass
 
 
 def _resolve_dtype(dtype_str: str):
@@ -103,6 +117,8 @@ class QwenStreamingService:
             "custom_voice": asyncio.Lock(),
             "voice_clone": asyncio.Lock(),
         }
+        self._active_stop_events: dict[str, threading.Event] = {}
+        self._active_stop_events_lock = threading.Lock()
 
     @property
     def model_ids(self) -> dict[str, str]:
@@ -113,6 +129,34 @@ class QwenStreamingService:
 
     def sampling_rate_for_mode(self, mode: str) -> int:
         return int(self._sampling_rates.get(mode, 24000))
+
+    def register_active_stream(self, mode: str, stop_event: threading.Event) -> None:
+        with self._active_stop_events_lock:
+            self._active_stop_events[mode] = stop_event
+
+    def clear_active_stream(self, mode: str, stop_event: threading.Event) -> None:
+        with self._active_stop_events_lock:
+            current = self._active_stop_events.get(mode)
+            if current is stop_event:
+                self._active_stop_events.pop(mode, None)
+
+    def request_stop(self, mode: Optional[str] = None) -> int:
+        with self._active_stop_events_lock:
+            if mode:
+                target = self._active_stop_events.get(mode)
+                if target is None:
+                    return 0
+                target.set()
+                logger.info("Stop requested for mode=%s", mode)
+                return 1
+
+            count = 0
+            for stop_event in self._active_stop_events.values():
+                stop_event.set()
+                count += 1
+            if count > 0:
+                logger.info("Stop requested for all active streams (count=%s)", count)
+            return count
 
     def get_supported_speakers(self, model) -> Optional[list[str]]:
         if model is None:
@@ -296,13 +340,45 @@ class QwenStreamingService:
             ref_code=ref_code,
         )
 
+    def _attach_stop_criteria(
+        self,
+        prepared: PreparedStreamRequest,
+        stop_event: threading.Event,
+    ) -> None:
+        cancel_criteria = StopEventCriteria(stop_event)
+        existing = prepared.generate_kwargs.get("stopping_criteria")
+        if existing is None:
+            prepared.generate_kwargs["stopping_criteria"] = StoppingCriteriaList([cancel_criteria])
+            return
+
+        if isinstance(existing, StoppingCriteriaList):
+            prepared.generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                list(existing) + [cancel_criteria]
+            )
+            return
+
+        if isinstance(existing, list):
+            prepared.generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                existing + [cancel_criteria]
+            )
+            return
+
+        prepared.generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
+            [existing, cancel_criteria]
+        )
+
     def _run_generate_with_hook_blocking(
         self,
         model,
         prepared: PreparedStreamRequest,
         events: Queue,
+        stop_event: threading.Event,
     ) -> None:
         talker = model.model.talker
+
+        def on_forward_pre(_module, _inputs):
+            if stop_event.is_set():
+                raise GenerationCancelled("generation cancelled by user")
 
         def on_forward(_module, _inputs, out):
             try:
@@ -315,12 +391,16 @@ class QwenStreamingService:
             except Exception as hook_exc:  # pragma: no cover
                 events.put(("error", f"stream hook failed: {hook_exc}"))
 
+        pre_hook_handle = talker.register_forward_pre_hook(on_forward_pre)
         hook_handle = talker.register_forward_hook(on_forward)
         try:
             model.model.generate(**prepared.generate_kwargs)
+        except GenerationCancelled:
+            events.put(("stopped", None))
         except Exception as exc:
             events.put(("error", str(exc)))
         finally:
+            pre_hook_handle.remove()
             hook_handle.remove()
             events.put(("done", None))
 
@@ -349,7 +429,7 @@ class QwenStreamingService:
 
         return wav, int(sample_rate)
 
-    async def stream_pcm16(self, params: StreamParams):
+    async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event):
         model = await self.ensure_model(params.mode)
         expected_sr = self.sampling_rate_for_mode(params.mode)
         loop = asyncio.get_running_loop()
@@ -359,6 +439,7 @@ class QwenStreamingService:
             model,
             params,
         )
+        self._attach_stop_criteria(prepared, stop_event)
 
         stream_lock = self._stream_locks[params.mode]
         async with stream_lock:
@@ -369,6 +450,7 @@ class QwenStreamingService:
                 model,
                 prepared,
                 events,
+                stop_event,
             )
 
             emitted_samples = 0
@@ -376,58 +458,68 @@ class QwenStreamingService:
             frame_buffer: list[torch.Tensor] = []
             done = False
 
-            while True:
-                had_event = False
+            try:
                 while True:
-                    try:
-                        event, payload = events.get_nowait()
-                    except Empty:
+                    if stop_event.is_set() and done:
                         break
-                    had_event = True
-                    if event == "frame":
-                        frame_buffer.append(payload)
-                    elif event == "error":
-                        raise RuntimeError(payload)
-                    elif event == "done":
-                        done = True
 
-                frames_ready = len(frame_buffer) - decoded_frames
-                should_decode = (
-                    frames_ready >= STREAM_DECODE_EVERY_FRAMES
-                    or (done and frames_ready > 0)
-                )
+                    had_event = False
+                    while True:
+                        try:
+                            event, payload = events.get_nowait()
+                        except Empty:
+                            break
+                        had_event = True
+                        if event == "frame":
+                            frame_buffer.append(payload)
+                        elif event == "error":
+                            raise RuntimeError(payload)
+                        elif event == "stopped":
+                            done = True
+                        elif event == "done":
+                            done = True
 
-                if should_decode:
-                    codes = torch.stack(frame_buffer, dim=0)
-                    wav_f32, sample_rate = await loop.run_in_executor(
-                        None,
-                        self._decode_codes_to_audio_blocking,
-                        model,
-                        codes,
-                        prepared.ref_code,
+                    frames_ready = len(frame_buffer) - decoded_frames
+                    should_decode = (
+                        frames_ready >= STREAM_DECODE_EVERY_FRAMES
+                        or (done and frames_ready > 0)
                     )
-                    decoded_frames = len(frame_buffer)
 
-                    if sample_rate != expected_sr:
-                        logger.warning(
-                            "Decoded sample rate (%s) differs from expected sample rate (%s).",
-                            sample_rate,
-                            expected_sr,
+                    if should_decode:
+                        codes = torch.stack(frame_buffer, dim=0)
+                        wav_f32, sample_rate = await loop.run_in_executor(
+                            None,
+                            self._decode_codes_to_audio_blocking,
+                            model,
+                            codes,
+                            prepared.ref_code,
                         )
+                        decoded_frames = len(frame_buffer)
 
-                    if wav_f32.size > emitted_samples:
-                        delta = wav_f32[emitted_samples:]
-                        emitted_samples = wav_f32.size
-                        pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
-                        if pcm16.size > 0:
-                            yield pcm16.tobytes()
+                        if sample_rate != expected_sr:
+                            logger.warning(
+                                "Decoded sample rate (%s) differs from expected sample rate (%s).",
+                                sample_rate,
+                                expected_sr,
+                            )
 
-                if done and decoded_frames >= len(frame_buffer):
-                    break
-                if not had_event:
-                    await asyncio.sleep(STREAM_POLL_SECONDS)
+                        if wav_f32.size > emitted_samples:
+                            delta = wav_f32[emitted_samples:]
+                            emitted_samples = wav_f32.size
+                            pcm16 = np.clip(delta * 32767.0, -32768, 32767).astype(np.int16)
+                            if pcm16.size > 0:
+                                yield pcm16.tobytes()
 
-            await generation_future
+                    if done and decoded_frames >= len(frame_buffer):
+                        break
+                    if not had_event:
+                        await asyncio.sleep(STREAM_POLL_SECONDS)
+            finally:
+                stop_event.set()
+                try:
+                    await asyncio.wait_for(generation_future, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Generation thread did not stop within timeout.")
 
 
 async def index_handler(request: web.Request):
@@ -455,9 +547,42 @@ async def health_handler(request: web.Request):
     )
 
 
+async def stop_handler(request: web.Request):
+    service: QwenStreamingService = request.app["service"]
+    mode: Optional[str] = None
+    try:
+        if request.content_type and "application/json" in request.content_type:
+            body = await request.json()
+            mode = body.get("mode")
+        else:
+            form = await request.post()
+            mode = form.get("mode")
+    except Exception:
+        mode = None
+
+    if mode is not None:
+        mode = str(mode).strip()
+        if mode == "":
+            mode = None
+        elif mode not in {"custom_voice", "voice_clone"}:
+            return web.json_response({"error": f"Unsupported mode: {mode!r}"}, status=400)
+
+    stopped = service.request_stop(mode=mode)
+    return web.json_response(
+        {
+            "status": "ok",
+            "stopped_streams": stopped,
+            "mode": mode or "all",
+        }
+    )
+
+
 async def stream_handler(request: web.Request):
     service: QwenStreamingService = request.app["service"]
     response: Optional[web.StreamResponse] = None
+    stream_iter: Optional[AsyncIterator[bytes]] = None
+    stop_event: Optional[threading.Event] = None
+    mode = "custom_voice"
 
     try:
         form = await request.post()
@@ -492,7 +617,9 @@ async def stream_handler(request: web.Request):
             reference_text=reference_text,
         )
 
-        stream_iter = service.stream_pcm16(params)
+        stop_event = threading.Event()
+        service.register_active_stream(mode, stop_event)
+        stream_iter = service.stream_pcm16(params, stop_event=stop_event)
         first_chunk = await anext(stream_iter)
 
         headers = {
@@ -510,6 +637,7 @@ async def stream_handler(request: web.Request):
                 await response.write(chunk_bytes)
             except ConnectionResetError:
                 logger.info("Client disconnected during stream.")
+                stop_event.set()
                 break
 
         try:
@@ -521,6 +649,8 @@ async def stream_handler(request: web.Request):
     except StopAsyncIteration:
         return web.json_response({"error": "Model generated empty audio output."}, status=400)
     except Exception as exc:
+        if stop_event is not None:
+            stop_event.set()
         logger.exception("Streaming request failed")
         if response is not None:
             try:
@@ -532,6 +662,15 @@ async def stream_handler(request: web.Request):
             {"error": str(exc)},
             status=400,
         )
+    finally:
+        if stop_event is not None:
+            stop_event.set()
+            service.clear_active_stream(mode, stop_event)
+        if stream_iter is not None:
+            try:
+                await stream_iter.aclose()
+            except Exception:
+                pass
 
 
 def build_app(
@@ -557,6 +696,7 @@ def build_app(
 
     app.router.add_get("/", index_handler)
     app.router.add_get("/api/health", health_handler)
+    app.router.add_post("/api/stop", stop_handler)
     app.router.add_post("/api/stream", stream_handler)
     app.router.add_static("/static", path=str(static_dir))
     return app
