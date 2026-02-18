@@ -98,6 +98,10 @@ ref_audio_embedding = model.create_voice_clone_prompt(
     , x_vector_only_mode    = False
 )
 
+print(ref_audio_embedding)
+ref_texts_for_ids = [(it.ref_text,it.ref_code,it.ref_spk_embedding) for it in ref_audio_embedding]
+print(ref_texts_for_ids)
+
 #%%
 wavs, sr = model.generate_voice_clone(
     text                    = ["I am solving the equation: x = [-b ± √(b²-4ac)] / 2a? Nobody can — it's a disaster (◍•͈⌔•͈◍), very sad!"]
