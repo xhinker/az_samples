@@ -38,7 +38,7 @@ DEFAULT_VOICE_CLONE_MODEL_ID = (
 DEFAULT_SPEAKER = "vivian"
 DEFAULT_LANGUAGE = "Auto"
 STREAM_DECODE_EVERY_FRAMES = 12
-STREAM_DECODE_OVERLAP_FRAMES = 24
+STREAM_DECODE_OVERLAP_FRAMES = 8
 STREAM_MAX_DECODE_FRAMES = 144
 STREAM_POLL_SECONDS = 0.01
 STREAM_BUFFER_RESET_SECONDS = 30.0
@@ -681,16 +681,26 @@ class QwenStreamingService:
                         emitted_samples_since_reset >= reset_samples_threshold
                         and decoded_global_frames >= end_global
                     ):
-                        # Periodically reset decode state to avoid long-run drift.
+                        # Periodically reset bookkeeping while preserving overlap context,
+                        # so decoder continuity does not get hard-cut every reset cycle.
+                        overlap_keep = max(0, min(
+                            STREAM_DECODE_OVERLAP_FRAMES,
+                            decoded_global_frames - frame_base_global,
+                        ))
+                        if overlap_keep > 0:
+                            frame_buffer = frame_buffer[-overlap_keep:]
+                            frame_base_global = decoded_global_frames - overlap_keep
+                        else:
+                            frame_buffer = []
+                            frame_base_global = decoded_global_frames
+
                         reset_anchor_global = decoded_global_frames
-                        frame_buffer = []
-                        frame_base_global = reset_anchor_global
-                        decoded_global_frames = reset_anchor_global
                         emitted_samples_since_reset = 0
                         needs_ref_prepend = has_ref_code
                         logger.info(
-                            "Reset streaming decode buffer after %.1fs of emitted audio.",
+                            "Reset streaming decode state after %.1fs; preserved %s overlap frames.",
                             STREAM_BUFFER_RESET_SECONDS,
+                            overlap_keep,
                         )
 
                 if done and decoded_global_frames >= end_global:
