@@ -106,10 +106,11 @@ wavs, sr = model.generate_voice_clone(
 )
 sf.write("outputs/output_voice_clone.wav", wavs[0], sr)
 
-#%% audio streaming
+#%% audio streaming test in VS Code interactive cell
 import numpy as np
+import time
 import torch
-from IPython.display import Audio, display, clear_output
+from IPython.display import Audio, display
 from qwen_tts import Qwen3TTSModel
 
 model = Qwen3TTSModel.from_pretrained(
@@ -120,11 +121,8 @@ model = Qwen3TTSModel.from_pretrained(
 )
 
 #%%
-# 1. Your existing setup
 ref_audio = "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/outputs/output_custom_voice_en.wav"
 ref_text  = "Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions."
-
-# Prepare the embedding (reusable across multiple generations)
 ref_audio_embedding = model.create_voice_clone_prompt(
     ref_audio=ref_audio,
     ref_text=ref_text,
@@ -132,33 +130,37 @@ ref_audio_embedding = model.create_voice_clone_prompt(
 )
 
 #%%
-# 2. Streaming Generation
 text_to_speak = """
 This is a streaming test using the cloned voice. I should hear the audio almost immediately.
 Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
 """
-sample_rate = 24000 
 
-# Initialize the generator
-# streaming=True triggers the 12.5Hz multi-codebook streaming logic
-audio_generator = model.generate_voice_clone(
+# In this qwen_tts version, generate_voice_clone returns (wavs, sr), not a chunk iterator.
+result = model.generate_voice_clone(
     text=text_to_speak,
     voice_clone_prompt=ref_audio_embedding,
-    streaming=True,
-    language="auto"  # Specify the target language
+    language="Auto",
+    non_streaming_mode=False,  # simulated streaming text-input mode; output is still a full waveform.
 )
 
-print("Starting stream...")
-
-for chunk in audio_generator:
-    # 1. Convert the list to a NumPy array first
-    # This fixes the AttributeError
-    audio_array = np.array(chunk, dtype=np.float32)
-    
-    # 2. Flatten and prepare for browser playback
-    audio_float = audio_array.flatten()
-    
-    # 3. Send over SSH to VS Code Interactive on Mac
-    # Check if audio_float has data before displaying
-    if audio_float.size > 0:
-        display(Audio(audio_float, rate=sample_rate, autoplay=True))
+if isinstance(result, tuple) and len(result) == 2:
+    wavs, sample_rate = result
+    audio_float = np.asarray(wavs[0], dtype=np.float32).flatten()
+    if audio_float.size == 0:
+        raise RuntimeError("Model returned empty audio.")
+    chunk_seconds = 2.0
+    samples_per_chunk = max(1, int(sample_rate * chunk_seconds))
+    for chunk_idx, start in enumerate(range(0, audio_float.size, samples_per_chunk), start=1):
+        end = min(start + samples_per_chunk, audio_float.size)
+        clip = audio_float[start:end]
+        print(f"Clip {chunk_idx}: samples [{start}:{end}]")
+        display(Audio(clip, rate=sample_rate, autoplay=True))
+        if end < audio_float.size:
+            time.sleep(chunk_seconds)
+else:
+    # Forward-compatible fallback if future versions return chunked audio.
+    sample_rate = 24000
+    for chunk in result:
+        audio_float = np.asarray(chunk, dtype=np.float32).flatten()
+        if audio_float.size > 0:
+            display(Audio(audio_float, rate=sample_rate, autoplay=True))
