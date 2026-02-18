@@ -5,3 +5,4 @@ aenum
 omegaconf
 prettytable
 sounddevice
+aiohttp

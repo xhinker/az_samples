@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qwen3-TTS Streaming</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="panel">
+      <h1>Qwen3-TTS Realtime Streaming</h1>
+      <p class="subhead">HTTP chunked PCM stream from <code>aiohttp</code> to browser Web Audio.</p>
+
+      <form id="stream-form">
+        <label for="text">Text</label>
+        <textarea id="text" name="text" rows="6" required placeholder="Paste text to speak..."></textarea>
+
+        <div class="grid">
+          <div>
+            <label for="mode">Mode</label>
+            <select id="mode" name="mode">
+              <option value="custom_voice">Custom Voice</option>
+              <option value="voice_clone">Voice Clone</option>
+            </select>
+          </div>
+          <div>
+            <label for="language">Language</label>
+            <input id="language" name="language" value="Auto" />
+          </div>
+        </div>
+
+        <div class="grid">
+          <div>
+            <label for="speaker">Speaker (custom mode)</label>
+            <input id="speaker" name="speaker" value="vivian" />
+          </div>
+          <div>
+            <label for="instruction">Instruction</label>
+            <input id="instruction" name="instruction" placeholder="e.g. Speak in a gentle tone" />
+          </div>
+        </div>
+
+        <section id="clone-fields">
+          <label for="reference_audio">Reference audio (.wav/.mp3/.flac)</label>
+          <input id="reference_audio" name="reference_audio" type="file" accept="audio/*">
+
+          <label for="reference_text">Reference transcript</label>
+          <textarea id="reference_text" name="reference_text" rows="3" placeholder="Text spoken in reference audio"></textarea>
+        </section>
+
+        <div class="actions">
+          <button id="start-btn" type="submit">Start Stream</button>
+          <button id="stop-btn" type="button" disabled>Stop</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel logs">
+      <h2>Status</h2>
+      <pre id="status-log"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

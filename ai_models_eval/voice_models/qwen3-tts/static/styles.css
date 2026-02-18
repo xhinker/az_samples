@@ -1,0 +1,144 @@
+:root {
+  --bg-a: #0e1820;
+  --bg-b: #132733;
+  --panel: rgba(10, 20, 28, 0.78);
+  --line: rgba(136, 201, 171, 0.35);
+  --text: #e9f7f0;
+  --muted: #a9c3b8;
+  --accent: #7cf0bc;
+  --accent-2: #f2b95e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+  background:
+    radial-gradient(1100px 600px at 90% -10%, rgba(242, 185, 94, 0.22), transparent 60%),
+    radial-gradient(1000px 700px at 10% 120%, rgba(124, 240, 188, 0.18), transparent 55%),
+    linear-gradient(140deg, var(--bg-a), var(--bg-b));
+}
+
+.shell {
+  width: min(1100px, 94vw);
+  margin: 28px auto;
+  display: grid;
+  gap: 20px;
+  grid-template-columns: 1.2fr 0.8fr;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px;
+  backdrop-filter: blur(8px);
+}
+
+h1,
+h2 {
+  margin: 0 0 10px;
+  letter-spacing: 0.02em;
+}
+
+.subhead {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+label {
+  font-size: 0.92rem;
+  color: var(--muted);
+}
+
+textarea,
+input,
+select {
+  width: 100%;
+  color: var(--text);
+  background: rgba(11, 30, 40, 0.9);
+  border: 1px solid rgba(170, 225, 199, 0.25);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+}
+
+textarea:focus,
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124, 240, 188, 0.2);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+#clone-fields {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px dashed rgba(242, 185, 94, 0.35);
+  border-radius: 12px;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font: inherit;
+  color: #07231a;
+  background: linear-gradient(120deg, var(--accent), #9ff3cf);
+  cursor: pointer;
+}
+
+#stop-btn {
+  background: linear-gradient(120deg, var(--accent-2), #ffd78d);
+  color: #2a1a05;
+}
+
+button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.logs pre {
+  margin: 0;
+  min-height: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: rgba(6, 12, 16, 0.86);
+  border: 1px solid rgba(156, 212, 184, 0.25);
+  padding: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #d8eee4;
+  line-height: 1.45;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+}
