@@ -108,6 +108,7 @@ sf.write("outputs/output_voice_clone.wav", wavs[0], sr)
 
 #%% audio streaming test in VS Code interactive cell
 import numpy as np
+import re
 import time
 import torch
 from IPython.display import Audio, display
@@ -131,36 +132,52 @@ ref_audio_embedding = model.create_voice_clone_prompt(
 
 #%%
 text_to_speak = """
-This is a streaming test using the cloned voice. I should hear the audio almost immediately.
-Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
+	This is a streaming test using the cloned voice. I should hear the audio almost immediately.
+	Actually, I've really discovered that I'm someone who's particularly good at observing other people's emotions.
 """
 
-# In this qwen_tts version, generate_voice_clone returns (wavs, sr), not a chunk iterator.
-result = model.generate_voice_clone(
-    text=text_to_speak,
-    voice_clone_prompt=ref_audio_embedding,
-    language="Auto",
-    non_streaming_mode=False,  # simulated streaming text-input mode; output is still a full waveform.
-)
+# This qwen_tts wrapper does not expose true audio-token streaming in Python.
+# Practical workaround: split text into short chunks and generate each chunk on demand.
+TARGET_CHUNK_SECONDS = 2.0
+WORDS_PER_SECOND = 2.5
+WORDS_PER_CHUNK = max(1, int(TARGET_CHUNK_SECONDS * WORDS_PER_SECOND))
 
-if isinstance(result, tuple) and len(result) == 2:
-    wavs, sample_rate = result
+
+def split_text_for_live_gen(text: str, words_per_chunk: int) -> list[str]:
+    text = " ".join(text.strip().split())
+    if not text:
+        return []
+    sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", text) if s]
+    chunks = []
+    for sent in sentences:
+        words = sent.split()
+        while len(words) > words_per_chunk:
+            chunks.append(" ".join(words[:words_per_chunk]))
+            words = words[words_per_chunk:]
+        if words:
+            chunks.append(" ".join(words))
+    return chunks
+
+
+text_chunks = split_text_for_live_gen(text_to_speak, words_per_chunk=WORDS_PER_CHUNK)
+if not text_chunks:
+    raise RuntimeError("No text to generate.")
+
+print(f"Planned {len(text_chunks)} generation chunks (target ~{TARGET_CHUNK_SECONDS:.1f}s each).")
+for idx, text_chunk in enumerate(text_chunks, start=1):
+    t0 = time.perf_counter()
+    wavs, sample_rate = model.generate_voice_clone(
+        text=text_chunk,
+        voice_clone_prompt=ref_audio_embedding,
+        language="English",
+        non_streaming_mode=False,
+    )
+    gen_s = time.perf_counter() - t0
     audio_float = np.asarray(wavs[0], dtype=np.float32).flatten()
     if audio_float.size == 0:
-        raise RuntimeError("Model returned empty audio.")
-    chunk_seconds = 2.0
-    samples_per_chunk = max(1, int(sample_rate * chunk_seconds))
-    for chunk_idx, start in enumerate(range(0, audio_float.size, samples_per_chunk), start=1):
-        end = min(start + samples_per_chunk, audio_float.size)
-        clip = audio_float[start:end]
-        print(f"Clip {chunk_idx}: samples [{start}:{end}]")
-        display(Audio(clip, rate=sample_rate, autoplay=True))
-        if end < audio_float.size:
-            time.sleep(chunk_seconds)
-else:
-    # Forward-compatible fallback if future versions return chunked audio.
-    sample_rate = 24000
-    for chunk in result:
-        audio_float = np.asarray(chunk, dtype=np.float32).flatten()
-        if audio_float.size > 0:
-            display(Audio(audio_float, rate=sample_rate, autoplay=True))
+        print(f"Chunk {idx}: empty output, skipped.")
+        continue
+    audio_s = audio_float.size / float(sample_rate)
+    print(f"Chunk {idx}/{len(text_chunks)} | gen={gen_s:.2f}s | audio={audio_s:.2f}s | text='{text_chunk}'")
+    display(Audio(audio_float, rate=sample_rate, autoplay=True))
+    time.sleep(max(0.0, audio_s))
