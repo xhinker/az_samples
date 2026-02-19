@@ -58,7 +58,7 @@ http://127.0.0.1:8080
 - Long text is automatically re-anchored into ~1-minute segments to avoid quality drift in very long autoregressive runs.
 
 ## TODO
-- [ ] Leverage audio_gen.py to live stream the output from a LLM model. here is the implementation details: 
+- [x] Leverage audio_gen.py to live stream the output from a LLM model. here is the implementation details: 
 1. Create another web page app using pure HTML, CSS and Javascript for LLM chat
 2. Reuse the web server called llm_audio_server.py as the backend host, using aiohttp, use port 8085. 
 3. Use Qwen3-TTS Base model so that can clone audio

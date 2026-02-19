@@ -687,9 +687,11 @@
       if (mode === 'voice_clone') {
         if (refAudioBase64) {
           wsPayload.reference_audio_b64 = refAudioBase64;
-          wsPayload.reference_text = getRefText();
         }
-        // Otherwise the server uses its pre-configured reference audio.
+        // Always send reference_text so the server can use it as a fallback
+        // when --ref-text was not supplied at startup.
+        const rt = getRefText();
+        if (rt) wsPayload.reference_text = rt;
       }
       ws.send(JSON.stringify(wsPayload));
     });

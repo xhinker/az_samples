@@ -325,16 +325,19 @@ async def chat_ws_handler(request: web.Request) -> web.WebSocketResponse:
 
         if mode == "voice_clone":
             client_ref_b64 = payload.get("reference_audio_b64")
+            client_ref_text = str(payload.get("reference_text") or "").strip()
             if client_ref_b64:
                 try:
                     ref_audio_bytes = base64.b64decode(client_ref_b64)
-                    ref_text = str(payload.get("reference_text") or "").strip()
+                    ref_text = client_ref_text
                 except Exception:
                     await _safe_send_json(ws, {"type": "error", "message": "Invalid reference_audio_b64 encoding."})
                     return ws
             elif server_ref_bytes:
                 ref_audio_bytes = server_ref_bytes
-                ref_text = server_ref_text
+                # If --ref-text was not supplied at startup, fall back to the
+                # reference text the client sent (e.g. from the UI textarea).
+                ref_text = server_ref_text or client_ref_text
             else:
                 await _safe_send_json(ws, {"type": "error", "message": (
                     "voice_clone mode requires reference audio. "
