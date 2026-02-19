@@ -372,41 +372,9 @@
         <label>Language</label>
         <select id="langSelect">
           <option value="">Auto-detect</option>
-          <option>Chinese</option>
-          <option>English</option>
-          <option>Cantonese</option>
-          <option>Arabic</option>
-          <option>German</option>
-          <option>French</option>
-          <option>Spanish</option>
-          <option>Portuguese</option>
-          <option>Indonesian</option>
-          <option>Italian</option>
-          <option>Korean</option>
-          <option>Russian</option>
-          <option>Thai</option>
-          <option>Vietnamese</option>
-          <option>Japanese</option>
-          <option>Turkish</option>
-          <option>Hindi</option>
-          <option>Malay</option>
-          <option>Dutch</option>
-          <option>Swedish</option>
-          <option>Danish</option>
-          <option>Finnish</option>
-          <option>Polish</option>
-          <option>Czech</option>
-          <option>Filipino</option>
-          <option>Persian</option>
-          <option>Greek</option>
-          <option>Romanian</option>
-          <option>Hungarian</option>
-          <option>Macedonian</option>
+          <option value="Chinese">Chinese</option>
+          <option value="English">English</option>
         </select>
-      </div>
-      <div class="field">
-        <label>Chunk size (sec)</label>
-        <input type="number" id="chunkSec" value="3" min="1" max="30" step="0.5" />
       </div>
       <div class="field">
         <label>Context / Hint</label>
@@ -475,7 +443,6 @@ const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.ho
 ══════════════════════════════════════════════════════════════════════════════ */
 const micBtn        = document.getElementById('micBtn');
 const langSelect    = document.getElementById('langSelect');
-const chunkSecInput = document.getElementById('chunkSec');
 const contextInput  = document.getElementById('contextInput');
 const statusPill    = document.getElementById('statusPill');
 const statusLabel   = document.getElementById('statusLabel');
@@ -500,8 +467,16 @@ let analyser     = null;
 let levelRafId   = null;
 let isRecording  = false;
 let sampleRate   = 44100;
-let pcmBuffer    = new Float32Array(0);
 let cursorEl     = null;   // the blinking cursor element in the transcript
+
+/* ── VAD state ────────────────────────────────────────────────────── */
+const VAD_THRESHOLD    = 0.025;   // RMS level that counts as "voice"
+const SILENCE_MS       = 500;     // ms of continuous silence → flush sentence
+const MAX_VOICE_SEC    = 15;      // force-flush after this many seconds of voice
+let   vadActive        = false;   // currently inside a voiced segment
+let   silenceTimer     = null;    // setTimeout handle for silence gate
+let   localChunks      = [];      // Float32Array pieces buffered locally
+let   localSampleCount = 0;       // total samples in localChunks
 
 /* ══════════════════════════════════════════════════════════════════════════════
    Logging
@@ -543,13 +518,11 @@ function appendToken(text) {
   transcriptBox.scrollTop = transcriptBox.scrollHeight;
 }
 
-function appendChunkSep() {
+function startNewSentenceLine() {
+  // Called when a sentence_done arrives — end current streaming line, add a new one
   removeCursor();
-  const sep = document.createElement('span');
-  sep.className = 'chunk-sep';
-  sep.textContent = ' ▪ ';
-  transcriptBox.appendChild(sep);
-  ensureCursor();
+  transcriptBox.appendChild(document.createElement('br'));
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -595,7 +568,6 @@ function sendConfig() {
   ws.send(JSON.stringify({
     cmd:        'config',
     sampleRate: sampleRate,
-    chunkSec:   parseFloat(chunkSecInput.value) || 3.0,
     language:   langSelect.value || null,
     context:    contextInput.value.trim(),
   }));
@@ -610,9 +582,9 @@ function handleServerMsg(msg) {
       setStatus('process', 'Processing…');
       appendToken(msg.text);
       break;
-    case 'chunk_done':
+    case 'sentence_done':
       setStatus('listen', 'Listening…');
-      appendChunkSep();
+      startNewSentenceLine();
       break;
     case 'end_ok':
       setStatus('ready', 'Ready');
@@ -666,6 +638,12 @@ async function startRecording() {
   // Send updated config with correct sample rate
   sendConfig();
 
+  // Reset VAD state
+  vadActive = false;
+  silenceTimer = null;
+  localChunks = [];
+  localSampleCount = 0;
+
   const source = audioCtx.createMediaStreamSource(micStream);
 
   // Analyser for level meter
@@ -673,15 +651,56 @@ async function startRecording() {
   analyser.fftSize = 256;
   source.connect(analyser);
 
-  // ScriptProcessorNode for raw PCM capture (4096 samples per callback)
+  // ScriptProcessorNode — 4096 samples ≈ 85 ms at 48 kHz
   const BUFFER_SIZE = 4096;
   scriptProc = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
   scriptProc.onaudioprocess = (ev) => {
     if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
-    // Float32Array of mono audio at sampleRate
-    const samples = ev.inputBuffer.getChannelData(0);
-    ws.send(samples.buffer.slice(0));   // send a copy as ArrayBuffer
+
+    const samples = ev.inputBuffer.getChannelData(0); // Float32Array
+
+    // ── RMS for VAD ──────────────────────────────────────────────────
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    const rms = Math.sqrt(sum / samples.length);
+
+    if (rms >= VAD_THRESHOLD) {
+      // ── Voice detected ──────────────────────────────────────────
+      if (!vadActive) {
+        vadActive = true;
+        setStatus('listen', 'Voice detected…');
+      }
+      // Cancel any pending silence flush
+      if (silenceTimer !== null) { clearTimeout(silenceTimer); silenceTimer = null; }
+
+      // Buffer the samples locally
+      localChunks.push(samples.slice(0));
+      localSampleCount += samples.length;
+
+      // ── Force-flush if we hit the 15-second cap ─────────────────
+      if (localSampleCount >= sampleRate * MAX_VOICE_SEC) {
+        flushVADBuffer();
+      }
+    } else if (vadActive) {
+      // ── Silence after voice — keep buffering but start the timer ─
+      localChunks.push(samples.slice(0));
+      localSampleCount += samples.length;
+
+      if (silenceTimer === null) {
+        silenceTimer = setTimeout(() => {
+          silenceTimer = null;
+          flushVADBuffer();
+        }, SILENCE_MS);
+      }
+    }
+    // else: silence with no prior voice — ignore entirely
+
+    // Update buffer info display
+    const bufferedSec = (localSampleCount / sampleRate).toFixed(1);
+    bufferInfo.textContent = vadActive
+      ? `Buffering: ${bufferedSec}s`
+      : 'Waiting for voice…';
   };
 
   source.connect(scriptProc);
@@ -698,6 +717,33 @@ async function startRecording() {
   startLevelMeter();
 }
 
+/* ══════════════════════════════════════════════════════════════════════════════
+   VAD flush — send accumulated voice audio to server as one binary message
+══════════════════════════════════════════════════════════════════════════════ */
+function flushVADBuffer() {
+  if (localChunks.length === 0) return;
+
+  // Cancel any pending silence timer
+  if (silenceTimer !== null) { clearTimeout(silenceTimer); silenceTimer = null; }
+
+  // Concatenate all buffered chunks
+  const combined = new Float32Array(localSampleCount);
+  let offset = 0;
+  for (const chunk of localChunks) { combined.set(chunk, offset); offset += chunk.length; }
+
+  // Reset VAD state before sending (so new voice can start immediately)
+  localChunks = [];
+  localSampleCount = 0;
+  vadActive = false;
+  bufferInfo.textContent = 'Waiting for voice…';
+  setStatus('listen', 'Listening…');
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(combined.buffer);                      // raw PCM
+    ws.send(JSON.stringify({ cmd: 'flush' }));     // ask server to run inference
+  }
+}
+
 function stopRecording() {
   if (!isRecording) return;
 
@@ -708,12 +754,26 @@ function stopRecording() {
   bufferInfo.classList.remove('visible');
   bufferInfo.textContent = '';
 
+  // Cancel pending silence timer
+  if (silenceTimer !== null) { clearTimeout(silenceTimer); silenceTimer = null; }
+
   stopLevelMeter();
 
-  // Tell server to flush remaining buffer
+  // Flush any remaining locally-buffered voice, then signal end
   if (ws && ws.readyState === WebSocket.OPEN) {
+    if (localChunks.length > 0) {
+      const combined = new Float32Array(localSampleCount);
+      let offset = 0;
+      for (const c of localChunks) { combined.set(c, offset); offset += c.length; }
+      ws.send(combined.buffer);
+    }
     ws.send(JSON.stringify({ cmd: 'end' }));
   }
+
+  // Reset VAD state
+  localChunks = [];
+  localSampleCount = 0;
+  vadActive = false;
 
   // Tear down audio pipeline
   if (scriptProc) { scriptProc.disconnect(); scriptProc = null; }

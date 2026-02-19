@@ -301,17 +301,19 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
     WebSocket protocol
     ------------------
     Client → Server (TEXT, JSON):
-        { cmd: "config",  sampleRate: <int>, chunkSec: <float>, language: <str|null>, context: <str> }
-        { cmd: "end" }    -- flush remaining buffer and send final result
-        { cmd: "clear" }  -- discard buffered audio
+        { cmd: "config", sampleRate: <int>, language: <str|null>, context: <str> }
+        { cmd: "flush" } -- VAD detected a pause; process buffered audio and stream result
+        { cmd: "end" }   -- recording stopped; flush remaining buffer
+        { cmd: "clear" } -- discard buffered audio without inference
 
     Client → Server (BINARY):
-        Raw float32 little-endian PCM samples at the configured sampleRate (mono).
+        Raw float32 little-endian PCM mono at sampleRate.
+        Only sent during detected voice activity (VAD gated on the client).
 
     Server → Client (TEXT, JSON):
         { type: "config_ok" }
         { type: "token",      text:    <str> }
-        { type: "chunk_done" }
+        { type: "sentence_done" }
         { type: "end_ok" }
         { type: "cleared" }
         { type: "error",      message: <str> }
@@ -322,7 +324,6 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
 
     # Per-connection state
     src_sr: int = TARGET_SR
-    chunk_sec: float = 3.0
     language: Optional[str] = None
     context: str = ""
     pcm_accum: np.ndarray = np.zeros((0,), dtype=np.float32)
@@ -337,7 +338,7 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
             while True:
                 kind, val = await queue.get()
                 if kind == "done":
-                    await ws.send_json({"type": "chunk_done"})
+                    await ws.send_json({"type": "sentence_done"})
                     break
                 elif kind == "token":
                     await ws.send_json({"type": "token", "text": val})
@@ -353,6 +354,16 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
         finally:
             inferring = False
 
+    async def flush_buffer() -> None:
+        """Process whatever audio is in pcm_accum, then clear it."""
+        nonlocal pcm_accum
+        if len(pcm_accum) < src_sr * MIN_AUDIO_SEC:
+            pcm_accum = np.zeros((0,), dtype=np.float32)
+            return
+        segment = pcm_accum.copy()
+        pcm_accum = np.zeros((0,), dtype=np.float32)
+        await do_inference(segment)
+
     try:
         async for msg in ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
@@ -365,22 +376,21 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
 
                 if cmd == "config":
                     src_sr = int(data.get("sampleRate", TARGET_SR))
-                    chunk_sec = float(data.get("chunkSec", 3.0))
                     language = (data.get("language") or "").strip() or None
                     context = (data.get("context") or "").strip()
                     pcm_accum = np.zeros((0,), dtype=np.float32)
-                    logger.info(
-                        "WS config: sr=%d chunk=%.1fs lang=%s", src_sr, chunk_sec, language
-                    )
+                    logger.info("WS config: sr=%d lang=%s", src_sr, language)
                     await ws.send_json({"type": "config_ok"})
 
+                elif cmd == "flush":
+                    # VAD-triggered sentence boundary — run inference if not already running
+                    if not inferring:
+                        await flush_buffer()
+
                 elif cmd == "end":
-                    if len(pcm_accum) > src_sr * MIN_AUDIO_SEC:
-                        segment = pcm_accum.copy()
-                        pcm_accum = np.zeros((0,), dtype=np.float32)
-                        await do_inference(segment)
-                    else:
-                        pcm_accum = np.zeros((0,), dtype=np.float32)
+                    # Recording stopped — flush remainder
+                    if not inferring:
+                        await flush_buffer()
                     await ws.send_json({"type": "end_ok"})
 
                 elif cmd == "clear":
@@ -388,16 +398,9 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
                     await ws.send_json({"type": "cleared"})
 
             elif msg.type == aiohttp.WSMsgType.BINARY:
-                # Raw float32 PCM chunk from the browser
+                # Voice-active PCM from client; just accumulate
                 chunk = np.frombuffer(msg.data, dtype=np.float32).copy()
                 pcm_accum = np.concatenate([pcm_accum, chunk])
-
-                chunk_samples = int(src_sr * chunk_sec)
-                # Kick off inference once we have enough audio and no inference is running
-                while len(pcm_accum) >= chunk_samples and not inferring:
-                    segment = pcm_accum[:chunk_samples].copy()
-                    pcm_accum = pcm_accum[chunk_samples:]
-                    asyncio.ensure_future(do_inference(segment))
 
             elif msg.type == aiohttp.WSMsgType.ERROR:
                 logger.error("WS protocol error: %s", ws.exception())
