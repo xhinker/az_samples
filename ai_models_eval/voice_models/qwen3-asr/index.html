@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Qwen3-ASR · Live Speech Recognition</title>
+  <style>
+    /* ── Reset & base ──────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --surface:   #161b22;
+      --surface2:  #21262d;
+      --border:    #30363d;
+      --accent:    #58a6ff;
+      --accent2:   #7c3aed;
+      --success:   #3fb950;
+      --warning:   #d29922;
+      --danger:    #f85149;
+      --text:      #e6edf3;
+      --text-muted:#8b949e;
+      --radius:    12px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px 64px;
+    }
+
+    /* ── Header ────────────────────────────────────────────────────── */
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.5px;
+    }
+    header p {
+      color: var(--text-muted);
+      margin-top: 6px;
+      font-size: 0.95rem;
+    }
+
+    /* ── Main card ─────────────────────────────────────────────────── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 860px;
+      overflow: hidden;
+    }
+
+    /* ── Controls bar ──────────────────────────────────────────────── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 20px 24px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    /* Mic button */
+    .mic-btn {
+      position: relative;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      color: #fff;
+      font-size: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.15s, box-shadow 0.15s;
+      flex-shrink: 0;
+      box-shadow: 0 4px 20px rgba(88,166,255,0.3);
+    }
+    .mic-btn:hover { transform: scale(1.05); }
+    .mic-btn:active { transform: scale(0.97); }
+    .mic-btn.recording {
+      background: linear-gradient(135deg, var(--danger), #b91c1c);
+      box-shadow: 0 4px 20px rgba(248,81,73,0.45);
+    }
+    /* Pulse ring when recording */
+    .mic-btn.recording::before {
+      content: '';
+      position: absolute;
+      inset: -6px;
+      border-radius: 50%;
+      border: 2px solid var(--danger);
+      animation: pulse-ring 1.2s ease-out infinite;
+      opacity: 0;
+    }
+    @keyframes pulse-ring {
+      0%   { transform: scale(0.92); opacity: 0.8; }
+      100% { transform: scale(1.25); opacity: 0; }
+    }
+
+    /* Settings */
+    .settings {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      flex: 1;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 140px;
+    }
+    .field label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .field select,
+    .field input {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 7px 10px;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .field select:focus,
+    .field input:focus {
+      border-color: var(--accent);
+    }
+    .field select option { background: var(--surface2); }
+
+    /* Status pill */
+    .status-wrap {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid transparent;
+      transition: all 0.25s;
+    }
+    .status-pill.idle    { background: var(--surface2); border-color: var(--border); color: var(--text-muted); }
+    .status-pill.ready   { background: #0d2016; border-color: var(--success); color: var(--success); }
+    .status-pill.listen  { background: #1a0e0e; border-color: var(--danger); color: var(--danger); }
+    .status-pill.process { background: #0e1525; border-color: var(--accent); color: var(--accent); }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .status-pill.listen .status-dot  { animation: blink 0.9s ease-in-out infinite; }
+    .status-pill.process .status-dot { animation: blink 0.5s ease-in-out infinite; }
+    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0.2; } }
+
+    /* ── Level meter ───────────────────────────────────────────────── */
+    .level-bar-wrap {
+      padding: 0 24px 16px;
+      display: none;
+    }
+    .level-bar-wrap.visible { display: block; }
+    .level-bar-label {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+    }
+    .level-bar-track {
+      height: 6px;
+      border-radius: 3px;
+      background: var(--surface2);
+      overflow: hidden;
+    }
+    .level-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: linear-gradient(90deg, var(--success), var(--warning), var(--danger));
+      width: 0%;
+      transition: width 0.08s linear;
+    }
+
+    /* ── Buffer counter ────────────────────────────────────────────── */
+    .buffer-info {
+      padding: 0 24px 12px;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      display: none;
+    }
+    .buffer-info.visible { display: block; }
+
+    /* ── Transcription area ────────────────────────────────────────── */
+    .transcript-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 24px 10px;
+      border-top: 1px solid var(--border);
+    }
+    .transcript-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+    .btn-clear {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-muted);
+      padding: 4px 12px;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .btn-clear:hover { border-color: var(--danger); color: var(--danger); }
+
+    .transcript-box {
+      min-height: 240px;
+      max-height: 480px;
+      overflow-y: auto;
+      padding: 16px 24px 24px;
+      line-height: 1.75;
+      font-size: 1.05rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .transcript-box:empty::before {
+      content: "Your transcription will appear here…";
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    /* Streaming cursor */
+    .cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.1em;
+      background: var(--accent);
+      vertical-align: text-bottom;
+      margin-left: 2px;
+      animation: blink-cursor 0.8s step-end infinite;
+    }
+    @keyframes blink-cursor { 0%,100%{opacity:1;} 50%{opacity:0;} }
+
+    /* Chunk separator */
+    .chunk-sep {
+      display: inline-block;
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      margin: 0 4px;
+    }
+
+    /* ── Upload panel ──────────────────────────────────────────────── */
+    .upload-panel {
+      border-top: 1px solid var(--border);
+      padding: 20px 24px;
+    }
+    .upload-panel summary {
+      cursor: pointer;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      user-select: none;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .upload-panel summary::-webkit-details-marker { display: none; }
+    .upload-panel summary::before { content: '▶'; font-size: 0.65rem; transition: transform 0.2s; }
+    .upload-panel[open] summary::before { transform: rotate(90deg); }
+    .upload-inner {
+      display: flex;
+      gap: 12px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .upload-inner input[type="file"] {
+      background: var(--surface2);
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: var(--text);
+      font-size: 0.85rem;
+      flex: 1;
+      min-width: 200px;
+    }
+    .btn-upload {
+      background: var(--accent);
+      color: #000;
+      font-weight: 700;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 18px;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn-upload:hover { opacity: 0.88; }
+    .btn-upload:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Log ────────────────────────────────────────────────────────── */
+    .log-panel {
+      border-top: 1px solid var(--border);
+      padding: 16px 24px;
+    }
+    .log-panel summary {
+      cursor: pointer;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      user-select: none;
+      list-style: none;
+    }
+    .log-panel summary::-webkit-details-marker { display: none; }
+    #logBox {
+      margin-top: 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      max-height: 140px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🎙 Qwen3-ASR</h1>
+  <p>Real-time Speech Recognition · Streaming Token Output</p>
+</header>
+
+<div class="card">
+
+  <!-- ── Controls ─────────────────────────────────────────────────── -->
+  <div class="controls">
+    <button class="mic-btn" id="micBtn" title="Click to start / stop recording">🎤</button>
+
+    <div class="settings">
+      <div class="field">
+        <label>Language</label>
+        <select id="langSelect">
+          <option value="">Auto-detect</option>
+          <option>Chinese</option>
+          <option>English</option>
+          <option>Cantonese</option>
+          <option>Arabic</option>
+          <option>German</option>
+          <option>French</option>
+          <option>Spanish</option>
+          <option>Portuguese</option>
+          <option>Indonesian</option>
+          <option>Italian</option>
+          <option>Korean</option>
+          <option>Russian</option>
+          <option>Thai</option>
+          <option>Vietnamese</option>
+          <option>Japanese</option>
+          <option>Turkish</option>
+          <option>Hindi</option>
+          <option>Malay</option>
+          <option>Dutch</option>
+          <option>Swedish</option>
+          <option>Danish</option>
+          <option>Finnish</option>
+          <option>Polish</option>
+          <option>Czech</option>
+          <option>Filipino</option>
+          <option>Persian</option>
+          <option>Greek</option>
+          <option>Romanian</option>
+          <option>Hungarian</option>
+          <option>Macedonian</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Chunk size (sec)</label>
+        <input type="number" id="chunkSec" value="3" min="1" max="30" step="0.5" />
+      </div>
+      <div class="field">
+        <label>Context / Hint</label>
+        <input type="text" id="contextInput" placeholder="optional domain hint…" style="min-width:180px" />
+      </div>
+    </div>
+
+    <div class="status-wrap">
+      <div class="status-pill idle" id="statusPill">
+        <span class="status-dot"></span>
+        <span id="statusLabel">Idle</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Level meter ───────────────────────────────────────────────── -->
+  <div class="level-bar-wrap" id="levelWrap">
+    <div class="level-bar-label">Mic Level</div>
+    <div class="level-bar-track">
+      <div class="level-bar-fill" id="levelFill"></div>
+    </div>
+  </div>
+
+  <!-- ── Buffer info ───────────────────────────────────────────────── -->
+  <div class="buffer-info" id="bufferInfo"></div>
+
+  <!-- ── Transcription ─────────────────────────────────────────────── -->
+  <div class="transcript-header">
+    <span class="transcript-title">Transcription</span>
+    <button class="btn-clear" id="clearBtn">Clear</button>
+  </div>
+  <div class="transcript-box" id="transcriptBox" aria-live="polite" aria-atomic="false"></div>
+
+  <!-- ── File upload panel ─────────────────────────────────────────── -->
+  <details class="upload-panel" id="uploadPanel">
+    <summary>Upload Audio File</summary>
+    <div class="upload-inner">
+      <input type="file" id="audioFile" accept="audio/*" />
+      <label class="field" style="min-width:130px">
+        <span class="field" style="font-size:0.72rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;">Stream?</span>
+        <select id="uploadMode">
+          <option value="stream">Streaming (SSE)</option>
+          <option value="full">Full (JSON)</option>
+        </select>
+      </label>
+      <button class="btn-upload" id="uploadBtn">Transcribe</button>
+    </div>
+  </details>
+
+  <!-- ── Log ───────────────────────────────────────────────────────── -->
+  <details class="log-panel">
+    <summary>Connection Log</summary>
+    <div id="logBox"></div>
+  </details>
+
+</div><!-- .card -->
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════════════
+   Configuration
+══════════════════════════════════════════════════════════════════════════════ */
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   DOM refs
+══════════════════════════════════════════════════════════════════════════════ */
+const micBtn        = document.getElementById('micBtn');
+const langSelect    = document.getElementById('langSelect');
+const chunkSecInput = document.getElementById('chunkSec');
+const contextInput  = document.getElementById('contextInput');
+const statusPill    = document.getElementById('statusPill');
+const statusLabel   = document.getElementById('statusLabel');
+const levelWrap     = document.getElementById('levelWrap');
+const levelFill     = document.getElementById('levelFill');
+const bufferInfo    = document.getElementById('bufferInfo');
+const transcriptBox = document.getElementById('transcriptBox');
+const clearBtn      = document.getElementById('clearBtn');
+const audioFile     = document.getElementById('audioFile');
+const uploadBtn     = document.getElementById('uploadBtn');
+const uploadMode    = document.getElementById('uploadMode');
+const logBox        = document.getElementById('logBox');
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   State
+══════════════════════════════════════════════════════════════════════════════ */
+let ws           = null;
+let audioCtx     = null;
+let micStream    = null;
+let scriptProc   = null;
+let analyser     = null;
+let levelRafId   = null;
+let isRecording  = false;
+let sampleRate   = 44100;
+let pcmBuffer    = new Float32Array(0);
+let cursorEl     = null;   // the blinking cursor element in the transcript
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Logging
+══════════════════════════════════════════════════════════════════════════════ */
+function log(msg) {
+  const ts = new Date().toLocaleTimeString();
+  logBox.textContent += `[${ts}] ${msg}\n`;
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Status helpers
+══════════════════════════════════════════════════════════════════════════════ */
+function setStatus(state, label) {
+  statusPill.className = `status-pill ${state}`;
+  statusLabel.textContent = label;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Transcript helpers
+══════════════════════════════════════════════════════════════════════════════ */
+function ensureCursor() {
+  if (!cursorEl) {
+    cursorEl = document.createElement('span');
+    cursorEl.className = 'cursor';
+    transcriptBox.appendChild(cursorEl);
+  }
+}
+
+function removeCursor() {
+  if (cursorEl) { cursorEl.remove(); cursorEl = null; }
+}
+
+function appendToken(text) {
+  removeCursor();
+  const node = document.createTextNode(text);
+  transcriptBox.appendChild(node);
+  ensureCursor();
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+
+function appendChunkSep() {
+  removeCursor();
+  const sep = document.createElement('span');
+  sep.className = 'chunk-sep';
+  sep.textContent = ' ▪ ';
+  transcriptBox.appendChild(sep);
+  ensureCursor();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   WebSocket
+══════════════════════════════════════════════════════════════════════════════ */
+function connectWS() {
+  if (ws && ws.readyState <= 1) return;   // already open / connecting
+
+  log(`Connecting to ${WS_URL}`);
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    log('WebSocket connected');
+    setStatus('ready', 'Ready');
+    // Send config immediately
+    sendConfig();
+  };
+
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      handleServerMsg(msg);
+    } catch (e) {
+      log(`WS parse error: ${e}`);
+    }
+  };
+
+  ws.onerror = (e) => {
+    log('WebSocket error');
+    setStatus('idle', 'Error');
+  };
+
+  ws.onclose = () => {
+    log('WebSocket closed');
+    if (isRecording) stopRecording();
+    setStatus('idle', 'Disconnected');
+  };
+}
+
+function sendConfig() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    cmd:        'config',
+    sampleRate: sampleRate,
+    chunkSec:   parseFloat(chunkSecInput.value) || 3.0,
+    language:   langSelect.value || null,
+    context:    contextInput.value.trim(),
+  }));
+}
+
+function handleServerMsg(msg) {
+  switch (msg.type) {
+    case 'config_ok':
+      log('Config acknowledged');
+      break;
+    case 'token':
+      setStatus('process', 'Processing…');
+      appendToken(msg.text);
+      break;
+    case 'chunk_done':
+      setStatus('listen', 'Listening…');
+      appendChunkSep();
+      break;
+    case 'end_ok':
+      setStatus('ready', 'Ready');
+      removeCursor();
+      break;
+    case 'cleared':
+      log('Buffer cleared');
+      break;
+    case 'error':
+      log(`Server error: ${msg.message}`);
+      setStatus('ready', 'Ready');
+      removeCursor();
+      break;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Microphone recording
+══════════════════════════════════════════════════════════════════════════════ */
+async function startRecording() {
+  if (isRecording) return;
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (err) {
+    log(`Mic access denied: ${err.message}`);
+    alert('Microphone access was denied. Please allow it in your browser settings.');
+    return;
+  }
+
+  // Connect WebSocket first
+  connectWS();
+
+  // Wait for WebSocket to open (max 5s)
+  await new Promise((resolve, reject) => {
+    if (ws.readyState === WebSocket.OPEN) return resolve();
+    const t = setTimeout(() => reject(new Error('WS timeout')), 5000);
+    ws.addEventListener('open', () => { clearTimeout(t); resolve(); }, { once: true });
+    ws.addEventListener('error', () => { clearTimeout(t); reject(new Error('WS error')); }, { once: true });
+  }).catch(err => {
+    log(`Connection failed: ${err.message}`);
+    stopMicStream();
+    return;
+  });
+
+  // Create AudioContext at native rate (Chrome on Mac is typically 44100 or 48000)
+  audioCtx = new AudioContext();
+  sampleRate = audioCtx.sampleRate;
+  log(`AudioContext sample rate: ${sampleRate} Hz`);
+
+  // Send updated config with correct sample rate
+  sendConfig();
+
+  const source = audioCtx.createMediaStreamSource(micStream);
+
+  // Analyser for level meter
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  source.connect(analyser);
+
+  // ScriptProcessorNode for raw PCM capture (4096 samples per callback)
+  const BUFFER_SIZE = 4096;
+  scriptProc = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
+
+  scriptProc.onaudioprocess = (ev) => {
+    if (!isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+    // Float32Array of mono audio at sampleRate
+    const samples = ev.inputBuffer.getChannelData(0);
+    ws.send(samples.buffer.slice(0));   // send a copy as ArrayBuffer
+  };
+
+  source.connect(scriptProc);
+  scriptProc.connect(audioCtx.destination);
+
+  isRecording = true;
+  micBtn.classList.add('recording');
+  micBtn.textContent = '⏹';
+  levelWrap.classList.add('visible');
+  bufferInfo.classList.add('visible');
+  setStatus('listen', 'Listening…');
+  log('Recording started');
+
+  startLevelMeter();
+}
+
+function stopRecording() {
+  if (!isRecording) return;
+
+  isRecording = false;
+  micBtn.classList.remove('recording');
+  micBtn.textContent = '🎤';
+  levelWrap.classList.remove('visible');
+  bufferInfo.classList.remove('visible');
+  bufferInfo.textContent = '';
+
+  stopLevelMeter();
+
+  // Tell server to flush remaining buffer
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ cmd: 'end' }));
+  }
+
+  // Tear down audio pipeline
+  if (scriptProc) { scriptProc.disconnect(); scriptProc = null; }
+  if (analyser)   { analyser.disconnect();   analyser = null; }
+  if (audioCtx)   { audioCtx.close();        audioCtx = null; }
+  stopMicStream();
+
+  setStatus('process', 'Finalising…');
+  log('Recording stopped — flushing…');
+}
+
+function stopMicStream() {
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Audio level meter
+══════════════════════════════════════════════════════════════════════════════ */
+const levelData = new Uint8Array(128);
+
+function startLevelMeter() {
+  function tick() {
+    levelRafId = requestAnimationFrame(tick);
+    if (!analyser) return;
+    analyser.getByteTimeDomainData(levelData);
+    // RMS
+    let sum = 0;
+    for (let i = 0; i < levelData.length; i++) {
+      const v = (levelData[i] / 128) - 1;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / levelData.length);
+    const pct = Math.min(100, rms * 400);
+    levelFill.style.width = pct + '%';
+  }
+  tick();
+}
+
+function stopLevelMeter() {
+  if (levelRafId) { cancelAnimationFrame(levelRafId); levelRafId = null; }
+  levelFill.style.width = '0%';
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Mic button click
+══════════════════════════════════════════════════════════════════════════════ */
+micBtn.addEventListener('click', () => {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Clear button
+══════════════════════════════════════════════════════════════════════════════ */
+clearBtn.addEventListener('click', () => {
+  transcriptBox.innerHTML = '';
+  cursorEl = null;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ cmd: 'clear' }));
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   File upload → SSE streaming or full JSON
+══════════════════════════════════════════════════════════════════════════════ */
+uploadBtn.addEventListener('click', async () => {
+  const file = audioFile.files[0];
+  if (!file) { alert('Please select an audio file.'); return; }
+
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = 'Transcribing…';
+  setStatus('process', 'Processing…');
+  removeCursor();
+
+  const fd = new FormData();
+  fd.append('audio', file);
+  fd.append('language', langSelect.value);
+  fd.append('context', contextInput.value.trim());
+
+  const mode = uploadMode.value;
+
+  if (mode === 'stream') {
+    // SSE streaming
+    try {
+      const resp = await fetch('/api/transcribe/stream', { method: 'POST', body: fd });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const reader = resp.body.getReader();
+      const dec    = new TextDecoder();
+      let buf = '';
+
+      ensureCursor();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop();           // keep incomplete last line
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue;
+          const raw = line.slice(5).trim();
+          if (raw === '[DONE]') { removeCursor(); break; }
+          try {
+            const obj = JSON.parse(raw);
+            if (obj.token) appendToken(obj.token);
+            if (obj.error) { log(`Upload error: ${obj.error}`); removeCursor(); }
+          } catch (_) {}
+        }
+      }
+    } catch (err) {
+      log(`Upload SSE error: ${err.message}`);
+      removeCursor();
+    }
+  } else {
+    // Full JSON
+    try {
+      const resp = await fetch('/api/transcribe', { method: 'POST', body: fd });
+      const obj  = await resp.json();
+      if (obj.error) {
+        log(`Upload error: ${obj.error}`);
+      } else {
+        appendToken(obj.text);
+        appendChunkSep();
+      }
+    } catch (err) {
+      log(`Upload error: ${err.message}`);
+    }
+  }
+
+  uploadBtn.disabled = false;
+  uploadBtn.textContent = 'Transcribe';
+  setStatus('ready', 'Ready');
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   Auto-connect WebSocket on page load (optional — gives faster first response)
+══════════════════════════════════════════════════════════════════════════════ */
+window.addEventListener('load', () => {
+  connectWS();
+});
+</script>
+</body>
+</html>
