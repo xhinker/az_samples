@@ -5,3 +5,5 @@ torchvision==0.23.0
 transformers==4.51.0
 jupyterlab
 librosa
+accelerate
+minicpmo-utils[all]
