@@ -191,7 +191,18 @@
       font-size: 0.72rem;
       color: var(--text-muted);
       margin-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
     }
+    .rms-value {
+      font-family: "SF Mono", "Fira Code", monospace;
+      font-size: 0.72rem;
+      color: var(--accent);
+      min-width: 5ch;
+      text-align: right;
+    }
+    .rms-value.hot { color: var(--danger); }
     .level-bar-track {
       height: 6px;
       border-radius: 3px;
@@ -392,7 +403,10 @@
 
   <!-- ── Level meter ───────────────────────────────────────────────── -->
   <div class="level-bar-wrap" id="levelWrap">
-    <div class="level-bar-label">Mic Level</div>
+    <div class="level-bar-label">
+      <span>Mic Level</span>
+      <span class="rms-value" id="rmsValue">0.000</span>
+    </div>
     <div class="level-bar-track">
       <div class="level-bar-fill" id="levelFill"></div>
     </div>
@@ -448,6 +462,7 @@ const statusPill    = document.getElementById('statusPill');
 const statusLabel   = document.getElementById('statusLabel');
 const levelWrap     = document.getElementById('levelWrap');
 const levelFill     = document.getElementById('levelFill');
+const rmsValue      = document.getElementById('rmsValue');
 const bufferInfo    = document.getElementById('bufferInfo');
 const transcriptBox = document.getElementById('transcriptBox');
 const clearBtn      = document.getElementById('clearBtn');
@@ -470,8 +485,8 @@ let sampleRate   = 44100;
 let cursorEl     = null;   // the blinking cursor element in the transcript
 
 /* ── VAD state ────────────────────────────────────────────────────── */
-const VAD_THRESHOLD    = 0.025;   // RMS level that counts as "voice"
-const SILENCE_MS       = 500;     // ms of continuous silence → flush sentence
+const VAD_THRESHOLD    = 0.07;   // RMS level that counts as "voice"
+const SILENCE_MS       = 800;     // ms of continuous silence → flush sentence
 const MAX_VOICE_SEC    = 15;      // force-flush after this many seconds of voice
 let   vadActive        = false;   // currently inside a voiced segment
 let   silenceTimer     = null;    // setTimeout handle for silence gate
@@ -664,6 +679,10 @@ async function startRecording() {
     let sum = 0;
     for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
     const rms = Math.sqrt(sum / samples.length);
+
+    // Display live RMS number; color red when above the VAD threshold
+    rmsValue.textContent = rms.toFixed(4);
+    rmsValue.className = 'rms-value' + (rms >= VAD_THRESHOLD ? ' hot' : '');
 
     if (rms >= VAD_THRESHOLD) {
       // ── Voice detected ──────────────────────────────────────────
