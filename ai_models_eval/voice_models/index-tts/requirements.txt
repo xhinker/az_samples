@@ -1,0 +1,6 @@
+--extra-index-url https://download.pytorch.org/whl/cu129
+torch==2.8.*
+torchaudio==2.8.*
+torchvision==0.23.0
+gradio
+jupyterlab
