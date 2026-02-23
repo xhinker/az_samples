@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>IndexTTS — Text to Speech</title>
+<style>
+  /* ------------------------------------------------------------------ */
+  /* Reset & base                                                         */
+  /* ------------------------------------------------------------------ */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:          #0f1117;
+    --surface:     #1a1d27;
+    --surface2:    #22263a;
+    --border:      #2e3354;
+    --accent:      #5b8af0;
+    --accent-h:    #7aa3f7;
+    --danger:      #e05c6a;
+    --success:     #4cca8a;
+    --text:        #e8eaf6;
+    --text-muted:  #7a82a8;
+    --radius:      12px;
+    --transition:  0.2s ease;
+  }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem 4rem;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Layout                                                               */
+  /* ------------------------------------------------------------------ */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    width: 100%;
+    max-width: 780px;
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    color: var(--accent);
+    margin-bottom: 0.25rem;
+  }
+  .subtitle {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    margin-bottom: 2rem;
+  }
+
+  section { margin-bottom: 1.5rem; }
+
+  label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 0.5rem;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Text area                                                            */
+  /* ------------------------------------------------------------------ */
+  textarea {
+    width: 100%;
+    min-height: 160px;
+    resize: vertical;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 1rem;
+    line-height: 1.6;
+    padding: 0.75rem 1rem;
+    outline: none;
+    transition: border-color var(--transition);
+  }
+  textarea:focus { border-color: var(--accent); }
+  textarea::placeholder { color: var(--text-muted); }
+
+  .char-count {
+    text-align: right;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 0.3rem;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Voice upload dropzone                                                */
+  /* ------------------------------------------------------------------ */
+  #dropzone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 1.5rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color var(--transition), background var(--transition);
+    position: relative;
+  }
+  #dropzone.drag-over {
+    border-color: var(--accent);
+    background: rgba(91,138,240,0.08);
+  }
+  #dropzone.has-file {
+    border-color: var(--success);
+    background: rgba(76,202,138,0.06);
+  }
+  #dropzone input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .dz-icon { font-size: 2rem; margin-bottom: 0.4rem; }
+  .dz-text { font-size: 0.9rem; color: var(--text-muted); }
+  .dz-file { font-size: 0.85rem; color: var(--success); font-weight: 600; margin-top: 0.3rem; }
+
+  /* ------------------------------------------------------------------ */
+  /* Buttons                                                              */
+  /* ------------------------------------------------------------------ */
+  .btn-row {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1.2rem;
+    border: none;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition), opacity var(--transition), transform 0.1s;
+  }
+  button:active { transform: scale(0.97); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-h); }
+
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-danger:hover:not(:disabled) { background: #ea7480; }
+
+  .btn-ghost {
+    background: var(--surface2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+
+  /* ------------------------------------------------------------------ */
+  /* Status badge                                                         */
+  /* ------------------------------------------------------------------ */
+  #status-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    min-height: 1.4rem;
+  }
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .dot.ready    { background: var(--success); }
+  .dot.busy     { background: var(--accent); animation: pulse 1s infinite; }
+  .dot.error    { background: var(--danger); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Progress bar                                                         */
+  /* ------------------------------------------------------------------ */
+  #progress-wrap {
+    height: 4px;
+    background: var(--surface2);
+    border-radius: 2px;
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity var(--transition);
+  }
+  #progress-wrap.visible { opacity: 1; }
+  #progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-h));
+    border-radius: 2px;
+    transition: width 0.3s ease;
+  }
+  #progress-bar.indeterminate {
+    width: 40%;
+    animation: slide 1.4s infinite ease-in-out;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%); }
+    100% { transform: translateX(300%); }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Audio player panel                                                   */
+  /* ------------------------------------------------------------------ */
+  #audio-panel {
+    display: none;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  #audio-panel.visible { display: flex; }
+
+  .waveform-container {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .playback-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  #play-pause-btn {
+    width: 40px; height: 40px; padding: 0;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #fff;
+    font-size: 1rem;
+    flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #play-pause-btn:hover:not(:disabled) { background: var(--accent-h); }
+
+  .seek-bar-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+  #seek-bar {
+    width: 100%;
+    accent-color: var(--accent);
+    cursor: pointer;
+    height: 4px;
+  }
+  .time-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .audio-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+  /* ------------------------------------------------------------------ */
+  /* Divider                                                              */
+  /* ------------------------------------------------------------------ */
+  hr { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0; }
+
+  /* ------------------------------------------------------------------ */
+  /* Scrollbar                                                            */
+  /* ------------------------------------------------------------------ */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>🔊 IndexTTS</h1>
+  <p class="subtitle">Real-time text-to-speech with reference voice cloning</p>
+
+  <!-- Text input -->
+  <section>
+    <label for="text-input">Text</label>
+    <textarea
+      id="text-input"
+      placeholder="Paste or type the text you want to convert to speech…"
+      spellcheck="false"
+    ></textarea>
+    <div class="char-count"><span id="char-count">0</span> characters</div>
+  </section>
+
+  <!-- Reference voice upload -->
+  <section>
+    <label>Reference Voice</label>
+    <div id="dropzone">
+      <input type="file" id="voice-file-input" accept="audio/*" />
+      <div class="dz-icon" id="dz-icon">🎙️</div>
+      <div class="dz-text" id="dz-text">Drop an audio file here, or click to select</div>
+      <div class="dz-file" id="dz-file"></div>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- Action buttons -->
+  <section>
+    <div class="btn-row">
+      <button class="btn-primary" id="generate-btn" disabled>
+        ▶ Generate Speech
+      </button>
+      <button class="btn-danger" id="stop-btn" disabled>
+        ■ Stop
+      </button>
+    </div>
+  </section>
+
+  <!-- Status & progress -->
+  <section>
+    <div id="status-bar">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">Upload a reference voice to get started</span>
+    </div>
+    <div style="margin-top:0.5rem;">
+      <div id="progress-wrap"><div id="progress-bar" class="indeterminate"></div></div>
+    </div>
+  </section>
+
+  <hr />
+
+  <!-- Audio output panel -->
+  <section id="audio-panel">
+    <label>Generated Audio</label>
+    <div class="waveform-container">
+      <div class="playback-controls">
+        <button id="play-pause-btn" title="Play / Pause">▶</button>
+        <div class="seek-bar-wrap">
+          <input type="range" id="seek-bar" min="0" max="100" value="0" step="0.1" />
+          <div class="time-row">
+            <span id="time-current">0:00</span>
+            <span id="time-total">0:00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="audio-actions">
+      <button class="btn-ghost" id="download-btn">⬇ Download WAV</button>
+      <button class="btn-ghost" id="clear-btn">✕ Clear</button>
+    </div>
+  </section>
+</div>
+
+<script>
+'use strict';
+
+// ============================================================
+// Streaming WAV player using Web Audio API
+// ============================================================
+class StreamingPlayer {
+  constructor() {
+    this.ctx = null;
+    this.sampleRate = 22050;
+    this.channels = 1;
+    this.nextStartTime = 0;
+    this.isPlaying = false;
+    this.allInt16 = [];        // collected for download & seek
+    this.totalSamples = 0;
+    this.sources = [];
+    this._onended = null;
+  }
+
+  init(sampleRate, channels) {
+    this.sampleRate = sampleRate;
+    this.channels   = channels;
+    if (this.ctx) { this.ctx.close(); }
+    this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+    this.nextStartTime = this.ctx.currentTime + 0.08; // small pre-roll buffer
+    this.isPlaying = true;
+    this.allInt16 = [];
+    this.totalSamples = 0;
+    this.sources = [];
+  }
+
+  /** Feed a chunk of int16 PCM samples. */
+  enqueue(int16Array) {
+    if (!this.ctx || !this.isPlaying) return;
+
+    // Persist for download
+    this.allInt16.push(new Int16Array(int16Array));
+    this.totalSamples += int16Array.length;
+
+    // Convert to float32 for Web Audio API
+    const f32 = new Float32Array(int16Array.length);
+    for (let i = 0; i < int16Array.length; i++) {
+      f32[i] = int16Array[i] / 32768.0;
+    }
+
+    const buf = this.ctx.createBuffer(this.channels, f32.length, this.sampleRate);
+    buf.getChannelData(0).set(f32);
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.ctx.destination);
+
+    const t = Math.max(this.ctx.currentTime, this.nextStartTime);
+    src.start(t);
+    this.nextStartTime = t + buf.duration;
+    this.sources.push({ src, startOffset: this.totalSamples - int16Array.length });
+
+    // Fire onended when the last scheduled buffer finishes
+    src.onended = () => {
+      if (this._onended && this.nextStartTime <= this.ctx.currentTime + 0.05) {
+        this._onended();
+      }
+    };
+  }
+
+  stop() {
+    this.isPlaying = false;
+    this.sources.forEach(({ src }) => { try { src.stop(); } catch (_) {} });
+    this.sources = [];
+    if (this.ctx) { this.ctx.suspend(); }
+  }
+
+  /** Current playback position in seconds. */
+  get currentTime() {
+    return this.ctx ? this.ctx.currentTime : 0;
+  }
+
+  /** Total audio duration in seconds. */
+  get totalDuration() {
+    return this.totalSamples / this.sampleRate;
+  }
+
+  /** Build a downloadable WAV Blob from all collected PCM. */
+  buildWavBlob() {
+    const total = this.allInt16.reduce((s, c) => s + c.length, 0);
+    const pcm = new Int16Array(total);
+    let off = 0;
+    for (const chunk of this.allInt16) { pcm.set(chunk, off); off += chunk.length; }
+    return new Blob([_buildWav(pcm, this.sampleRate, this.channels)], { type: 'audio/wav' });
+  }
+}
+
+function _buildWav(int16Array, sampleRate, channels) {
+  const dataLen  = int16Array.byteLength;
+  const buf      = new ArrayBuffer(44 + dataLen);
+  const v        = new DataView(buf);
+  const ws = (off, s) => s.split('').forEach((c, i) => v.setUint8(off + i, c.charCodeAt(0)));
+  ws(0,  'RIFF');  v.setUint32(4,  36 + dataLen, true);
+  ws(8,  'WAVE');  ws(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);   // PCM
+  v.setUint16(22, channels, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * channels * 2, true);
+  v.setUint16(32, channels * 2, true);
+  v.setUint16(34, 16, true);
+  ws(36, 'data');  v.setUint32(40, dataLen, true);
+  new Int16Array(buf, 44).set(int16Array);
+  return buf;
+}
+
+// ============================================================
+// WAV header parser
+// ============================================================
+function parseWavHeader(bytes) {
+  if (bytes.length < 44) return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset);
+  const tag = String.fromCharCode(...bytes.slice(0, 4));
+  if (tag !== 'RIFF') return null;
+  return {
+    channels:   v.getUint16(22, true),
+    sampleRate: v.getUint32(24, true),
+  };
+}
+
+// ============================================================
+// State
+// ============================================================
+let voiceId     = null;
+let player      = new StreamingPlayer();
+let controller  = null;   // AbortController for fetch
+let downloading = false;
+let downloadUrl = null;
+let generating  = false;
+
+// ============================================================
+// DOM refs
+// ============================================================
+const $text       = document.getElementById('text-input');
+const $charCount  = document.getElementById('char-count');
+const $dropzone   = document.getElementById('dropzone');
+const $fileInput  = document.getElementById('voice-file-input');
+const $dzIcon     = document.getElementById('dz-icon');
+const $dzText     = document.getElementById('dz-text');
+const $dzFile     = document.getElementById('dz-file');
+const $genBtn     = document.getElementById('generate-btn');
+const $stopBtn    = document.getElementById('stop-btn');
+const $statusDot  = document.getElementById('status-dot');
+const $statusText = document.getElementById('status-text');
+const $progWrap   = document.getElementById('progress-wrap');
+const $progBar    = document.getElementById('progress-bar');
+const $audioPanel = document.getElementById('audio-panel');
+const $playPause  = document.getElementById('play-pause-btn');
+const $seekBar    = document.getElementById('seek-bar');
+const $timeCur    = document.getElementById('time-current');
+const $timeTotal  = document.getElementById('time-total');
+const $dlBtn      = document.getElementById('download-btn');
+const $clearBtn   = document.getElementById('clear-btn');
+
+// ============================================================
+// Utilities
+// ============================================================
+function setStatus(msg, type /* ready | busy | error | '' */) {
+  $statusText.textContent = msg;
+  $statusDot.className = 'dot' + (type ? ' ' + type : '');
+}
+
+function setProgress(visible, indeterminate, pct) {
+  if (visible) {
+    $progWrap.classList.add('visible');
+    if (indeterminate) {
+      $progBar.classList.add('indeterminate');
+    } else {
+      $progBar.classList.remove('indeterminate');
+      $progBar.style.width = pct + '%';
+    }
+  } else {
+    $progWrap.classList.remove('visible');
+    $progBar.style.width = '0%';
+    $progBar.classList.remove('indeterminate');
+  }
+}
+
+function fmtTime(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function refreshSeek() {
+  if (!player.ctx) return;
+  const cur   = player.currentTime;
+  const total = player.totalDuration;
+  $timeCur.textContent   = fmtTime(cur);
+  $timeTotal.textContent = fmtTime(total);
+  if (total > 0) {
+    $seekBar.value = (cur / total) * 100;
+  }
+}
+
+// ============================================================
+// Text area character count
+// ============================================================
+$text.addEventListener('input', () => {
+  $charCount.textContent = $text.value.length;
+  updateGenBtn();
+});
+
+function updateGenBtn() {
+  $genBtn.disabled = !voiceId || !$text.value.trim() || generating;
+}
+
+// ============================================================
+// Dropzone — drag & drop + click-to-select
+// ============================================================
+$dropzone.addEventListener('dragover', e => { e.preventDefault(); $dropzone.classList.add('drag-over'); });
+$dropzone.addEventListener('dragleave', () => $dropzone.classList.remove('drag-over'));
+$dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  $dropzone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) handleVoiceFile(f);
+});
+$fileInput.addEventListener('change', () => {
+  if ($fileInput.files[0]) handleVoiceFile($fileInput.files[0]);
+});
+
+async function handleVoiceFile(file) {
+  $dzIcon.textContent = '⏳';
+  $dzText.textContent = 'Uploading…';
+  $dzFile.textContent = '';
+  setStatus('Uploading reference voice…', 'busy');
+  setProgress(true, true);
+
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch('/api/upload-voice', { method: 'POST', body: fd });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    voiceId = data.voice_id;
+
+    $dropzone.classList.add('has-file');
+    $dzIcon.textContent = '✅';
+    $dzText.textContent = 'Reference voice ready';
+    $dzFile.textContent = file.name;
+    setStatus('Reference voice uploaded. Ready to generate.', 'ready');
+    setProgress(false);
+    updateGenBtn();
+  } catch (err) {
+    $dzIcon.textContent = '❌';
+    $dzText.textContent = 'Upload failed — try again';
+    $dzFile.textContent = '';
+    setStatus('Upload failed: ' + err.message, 'error');
+    setProgress(false);
+  }
+}
+
+// ============================================================
+// Generate
+// ============================================================
+$genBtn.addEventListener('click', startGeneration);
+
+async function startGeneration() {
+  const text = $text.value.trim();
+  if (!text || !voiceId) return;
+
+  // Reset previous playback
+  player.stop();
+  player = new StreamingPlayer();
+  revokeDownload();
+  $audioPanel.classList.remove('visible');
+  $playPause.textContent = '▶';
+  $seekBar.value = 0;
+  $timeCur.textContent = '0:00';
+  $timeTotal.textContent = '0:00';
+
+  generating = true;
+  $genBtn.disabled = true;
+  $stopBtn.disabled = false;
+  setStatus('Generating speech…', 'busy');
+  setProgress(true, true);
+
+  controller = new AbortController();
+
+  try {
+    const res = await fetch('/api/tts/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, voice_id: voiceId }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Server error ${res.status}: ${await res.text()}`);
+    }
+
+    const reader  = res.body.getReader();
+    let pending   = new Uint8Array(0);
+    let headerOk  = false;
+
+    function append(chunk) {
+      const merged = new Uint8Array(pending.length + chunk.length);
+      merged.set(pending);
+      merged.set(chunk, pending.length);
+      pending = merged;
+    }
+
+    // ---- read loop ----
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      append(value);
+
+      // Parse the 44-byte WAV header on first data
+      if (!headerOk && pending.length >= 44) {
+        const info = parseWavHeader(pending);
+        if (info) {
+          player.init(info.sampleRate, info.channels);
+          $audioPanel.classList.add('visible');
+        }
+        pending  = pending.slice(44);
+        headerOk = true;
+      }
+
+      // Feed complete int16 pairs to the player
+      if (headerOk && pending.length >= 2) {
+        const byteCount = pending.length & ~1; // round down to even
+        if (byteCount > 0) {
+          const pcm = new Int16Array(
+            pending.buffer.slice(pending.byteOffset, pending.byteOffset + byteCount)
+          );
+          pending = pending.slice(byteCount);
+          player.enqueue(pcm);
+          refreshSeek();
+        }
+      }
+
+      setProgress(true, false, Math.min(95, (player.totalSamples / player.sampleRate) * 4));
+    }
+
+    // Flush any remaining byte (shouldn't happen with int16, but just in case)
+    if (headerOk && pending.length >= 2) {
+      const byteCount = pending.length & ~1;
+      if (byteCount > 0) {
+        player.enqueue(new Int16Array(pending.buffer.slice(pending.byteOffset, pending.byteOffset + byteCount)));
+      }
+    }
+
+    setStatus(
+      `Done — ${fmtTime(player.totalDuration)} of audio generated`,
+      'ready'
+    );
+    setProgress(true, false, 100);
+    setTimeout(() => setProgress(false), 1200);
+    refreshSeek();
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      setStatus('Generation stopped.', '');
+    } else {
+      setStatus('Error: ' + err.message, 'error');
+      console.error(err);
+    }
+    setProgress(false);
+  } finally {
+    generating = false;
+    $genBtn.disabled  = false;
+    $stopBtn.disabled = true;
+    updateGenBtn();
+    controller = null;
+  }
+}
+
+// ============================================================
+// Stop
+// ============================================================
+$stopBtn.addEventListener('click', () => {
+  if (controller) controller.abort();
+  player.stop();
+  generating = false;
+  $genBtn.disabled  = false;
+  $stopBtn.disabled = true;
+  updateGenBtn();
+  setProgress(false);
+  setStatus('Stopped.', '');
+});
+
+// ============================================================
+// Play / Pause (replay from start using a new AudioContext)
+// ============================================================
+$playPause.addEventListener('click', () => {
+  if (!player.ctx) return;
+  if (player.ctx.state === 'suspended') {
+    player.ctx.resume();
+    $playPause.textContent = '⏸';
+  } else {
+    player.ctx.suspend();
+    $playPause.textContent = '▶';
+  }
+});
+
+// Update button icon during playback
+setInterval(() => {
+  if (!player.ctx) return;
+  $playPause.textContent = player.ctx.state === 'running' ? '⏸' : '▶';
+  refreshSeek();
+}, 250);
+
+// ============================================================
+// Download
+// ============================================================
+$dlBtn.addEventListener('click', () => {
+  if (player.allInt16.length === 0) return;
+  revokeDownload();
+  const blob = player.buildWavBlob();
+  downloadUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = downloadUrl;
+  a.download = `indextts_${Date.now()}.wav`;
+  a.click();
+});
+
+function revokeDownload() {
+  if (downloadUrl) { URL.revokeObjectURL(downloadUrl); downloadUrl = null; }
+}
+
+// ============================================================
+// Clear
+// ============================================================
+$clearBtn.addEventListener('click', () => {
+  player.stop();
+  player = new StreamingPlayer();
+  revokeDownload();
+  $audioPanel.classList.remove('visible');
+  $seekBar.value = 0;
+  $timeCur.textContent = '0:00';
+  $timeTotal.textContent = '0:00';
+  $playPause.textContent = '▶';
+  if (voiceId) {
+    setStatus('Reference voice ready. Ready to generate.', 'ready');
+  } else {
+    setStatus('Upload a reference voice to get started', '');
+  }
+});
+
+// ============================================================
+// Initial state
+// ============================================================
+setStatus('Upload a reference voice to get started', '');
+</script>
+</body>
+</html>
