@@ -131,10 +131,11 @@ class TTSEngine:
     thread to async consumers via an asyncio.Queue.
     """
 
-    def __init__(self, use_fp16: bool = True, use_cuda_kernel: bool = False):
+    def __init__(self, use_fp16: bool = True, use_cuda_kernel: bool = False, device: str = "cuda:0"):
         self._model = None
         self._use_fp16 = use_fp16
         self._use_cuda_kernel = use_cuda_kernel
+        self._device = device
         # One worker: GPU can only run one inference at a time
         self._executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="tts_worker"
@@ -163,6 +164,7 @@ class TTSEngine:
             model_dir=MODEL_DIR,
             use_fp16=self._use_fp16,
             use_cuda_kernel=self._use_cuda_kernel,
+            device=self._device,
         )
         logger.info("IndexTTS2 model loaded successfully")
         return self._model
@@ -294,9 +296,9 @@ class TTSEngine:
 _engine: Optional[TTSEngine] = None
 
 
-def get_engine(use_fp16: bool = True, use_cuda_kernel: bool = False) -> TTSEngine:
+def get_engine(use_fp16: bool = True, use_cuda_kernel: bool = False, device: str = "cuda:0") -> TTSEngine:
     """Return the global TTSEngine singleton, creating it on first call."""
     global _engine
     if _engine is None:
-        _engine = TTSEngine(use_fp16=use_fp16, use_cuda_kernel=use_cuda_kernel)
+        _engine = TTSEngine(use_fp16=use_fp16, use_cuda_kernel=use_cuda_kernel, device=device)
     return _engine

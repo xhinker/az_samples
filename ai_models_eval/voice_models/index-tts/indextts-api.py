@@ -255,14 +255,19 @@ async def _streaming_response(
 
 async def on_startup(app: web.Application):
     logger.info("Loading IndexTTS2 model …")
-    engine = get_engine(use_fp16=True, use_cuda_kernel=False)
+    engine = get_engine(
+        use_fp16=True,
+        use_cuda_kernel=False,
+        device=app["device"],
+    )
     app["engine"] = engine
     await engine.load_model()
     logger.info("IndexTTS API server is ready")
 
 
-def create_app() -> web.Application:
+def create_app(device: str = "cuda:0") -> web.Application:
     app = web.Application(client_max_size=100 * 1024 * 1024)  # 100 MB uploads
+    app["device"] = device
     app.add_routes(routes)
     app.on_startup.append(on_startup)
     return app
@@ -272,10 +277,11 @@ def main():
     parser = argparse.ArgumentParser(description="IndexTTS OpenAI-compatible API")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8085)
+    parser.add_argument("--device", default="cuda:0", help="CUDA device (e.g. cuda:0, cuda:1, cpu)")
     args = parser.parse_args()
 
-    app = create_app()
-    logger.info("IndexTTS API → http://%s:%d", args.host, args.port)
+    app = create_app(device=args.device)
+    logger.info("IndexTTS API → http://%s:%d  (device=%s)", args.host, args.port, args.device)
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 
