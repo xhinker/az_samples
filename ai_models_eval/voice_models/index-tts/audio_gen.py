@@ -184,22 +184,37 @@ class TTSEngine:
         self,
         text: str,
         spk_audio_prompt: str,
-        quick_streaming_tokens: int = 20,
+        quick_streaming_tokens: int = 5,
+        max_text_tokens_per_segment: int = 40,
+        diffusion_steps: int = 20,
         **kwargs,
     ) -> AsyncGenerator[bytes, None]:
         """
         Real streaming TTS async generator.
 
         Yields raw PCM int16 bytes (mono, 22050 Hz) as each text segment is
-        decoded — the first audio arrives before the full text is synthesised.
+        decoded — the first audio arrives before the full text is synthesized.
+
+        Latency-tuning knobs:
+            quick_streaming_tokens:      Segments totalling fewer than this many
+                                         tokens are NOT merged together, so the
+                                         very first natural sentence stays small.
+                                         Lower = faster first chunk. (default 5)
+            max_text_tokens_per_segment: Hard cap on segment length; shorter
+                                         segments produce audio sooner.
+                                         Lower = faster first chunk, more passes.
+                                         (default 40 for streaming; non-streaming
+                                          uses the model default of 120)
+            diffusion_steps:             s2mel flow-matching steps per segment.
+                                         Fewer steps = faster, slightly lower
+                                         quality. 10-15 is a good streaming
+                                         trade-off. (default 15)
 
         Args:
-            text:                    Text to synthesise.
-            spk_audio_prompt:        Absolute path to the reference voice audio.
-            quick_streaming_tokens:  Segment granularity; smaller = lower
-                                     first-audio latency (default 20 tokens).
-            **kwargs:                Forwarded to infer_generator (temperature,
-                                     top_p, max_mel_tokens, etc.).
+            text:             Text to synthesise.
+            spk_audio_prompt: Absolute path to the reference voice audio.
+            **kwargs:         Forwarded to infer_generator (temperature,
+                              top_p, max_mel_tokens, etc.).
 
         Yields:
             bytes: Raw PCM int16 audio chunk.
@@ -215,9 +230,11 @@ class TTSEngine:
                 gen = self._model.infer_generator(
                     spk_audio_prompt=spk_audio_prompt,
                     text=text,
-                    output_path=None,           # no file output
-                    stream_return=True,          # per-segment streaming
+                    output_path=None,                          # no file output
+                    stream_return=True,                        # per-segment streaming
                     quick_streaming_tokens=quick_streaming_tokens,
+                    max_text_tokens_per_segment=max_text_tokens_per_segment,
+                    diffusion_steps=diffusion_steps,
                     **kwargs,
                 )
                 for wav_chunk in gen:
