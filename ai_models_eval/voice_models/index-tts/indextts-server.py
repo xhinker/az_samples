@@ -190,7 +190,7 @@ def create_app() -> web.Application:
 def main():
     parser = argparse.ArgumentParser(description="IndexTTS WebUI Server")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--port", type=int, default=8086)
     args = parser.parse_args()
 
     html_path = os.path.join(STATIC_DIR, "index.html")

@@ -271,7 +271,7 @@ def create_app() -> web.Application:
 def main():
     parser = argparse.ArgumentParser(description="IndexTTS OpenAI-compatible API")
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8085)
     args = parser.parse_args()
 
     app = create_app()
