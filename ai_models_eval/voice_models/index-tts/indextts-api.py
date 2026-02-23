@@ -242,10 +242,15 @@ async def _streaming_response(
     try:
         async for chunk in engine.stream_wav(text, voice_path):
             await resp.write(chunk)
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        logger.info("Streaming TTS: client disconnected, stopping generation")
     except Exception:
         logger.exception("Error during streaming TTS")
     finally:
-        await resp.write_eof()
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass  # connection may already be closed
     return resp
 
 

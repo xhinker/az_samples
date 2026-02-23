@@ -26,6 +26,8 @@ import wave
 import struct
 import asyncio
 import logging
+import threading
+import concurrent.futures as cf
 from concurrent.futures import ThreadPoolExecutor
 from typing import AsyncGenerator, Optional
 
@@ -222,35 +224,76 @@ class TTSEngine:
         await self.load_model()
 
         loop = asyncio.get_event_loop()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=16)
+        # Small queue: less buffering = faster stop response
+        queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+        stop_event = threading.Event()
         SENTINEL = object()
 
         def _run_inference():
+            """
+            Inference thread.  Uses stop_event to exit cleanly when the
+            consumer (client) disconnects or clicks Stop.
+
+            queue.put() is polled with a 200 ms timeout so the thread
+            can notice stop_event even when the queue is full and the
+            async consumer has already stopped draining it.
+            """
+            gen = None
             try:
                 gen = self._model.infer_generator(
                     spk_audio_prompt=spk_audio_prompt,
                     text=text,
-                    output_path=None,                          # no file output
-                    stream_return=True,                        # per-segment streaming
+                    output_path=None,
+                    stream_return=True,
                     quick_streaming_tokens=quick_streaming_tokens,
                     max_text_tokens_per_segment=max_text_tokens_per_segment,
                     diffusion_steps=diffusion_steps,
                     **kwargs,
                 )
                 for wav_chunk in gen:
-                    if isinstance(wav_chunk, torch.Tensor) and wav_chunk.numel() > 0:
-                        pcm = tensor_to_pcm_bytes(wav_chunk)
-                        if pcm:
-                            asyncio.run_coroutine_threadsafe(
-                                queue.put(pcm), loop
-                            ).result()
+                    # Check stop signal at the top of every segment loop
+                    if stop_event.is_set():
+                        break
+                    if not (isinstance(wav_chunk, torch.Tensor) and wav_chunk.numel() > 0):
+                        continue
+                    pcm = tensor_to_pcm_bytes(wav_chunk)
+                    if not pcm:
+                        continue
+                    # Put into queue; poll every 200 ms so we catch stop_event
+                    # even when the queue is full and the consumer has stopped.
+                    put_fut = asyncio.run_coroutine_threadsafe(queue.put(pcm), loop)
+                    while True:
+                        try:
+                            put_fut.result(timeout=0.2)
+                            break                        # put succeeded
+                        except cf.TimeoutError:
+                            if stop_event.is_set():
+                                put_fut.cancel()
+                                return  # exit _run_inference entirely
             except Exception as exc:
                 logger.exception("Error in TTS inference thread")
-                asyncio.run_coroutine_threadsafe(queue.put(exc), loop).result()
+                if not stop_event.is_set():
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            queue.put(exc), loop
+                        ).result(timeout=2)
+                    except Exception:
+                        pass
             finally:
-                asyncio.run_coroutine_threadsafe(
-                    queue.put(SENTINEL), loop
-                ).result()
+                # Close the generator to free GPU resources immediately
+                if gen is not None:
+                    try:
+                        gen.close()
+                    except Exception:
+                        pass
+                # Always send SENTINEL so the consumer can exit its loop.
+                # Use a timeout so we never block forever if consumer is gone.
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put(SENTINEL), loop
+                    ).result(timeout=5)
+                except Exception:
+                    pass
 
         inference_future = loop.run_in_executor(self._executor, _run_inference)
 
@@ -263,12 +306,26 @@ class TTSEngine:
                     raise chunk
                 yield chunk
         finally:
-            try:
-                await asyncio.wait_for(
-                    asyncio.wrap_future(inference_future), timeout=600
-                )
-            except asyncio.TimeoutError:
-                logger.warning("TTS inference timed out after 600 s")
+            # 1. Tell the inference thread to stop.
+            stop_event.set()
+            # 2. Drain the queue so the thread is never blocked on queue.put()
+            #    and can reach its own stop_event check or send SENTINEL.
+            #    Loop until the thread finishes, yielding to the event loop
+            #    each iteration so pending queue.put() coroutines can run.
+            while not inference_future.done():
+                while True:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                await asyncio.sleep(0.05)
+            # Final drain (picks up the SENTINEL the thread sends in its finally)
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            logger.debug("TTS inference thread stopped cleanly")
 
     # ------------------------------------------------------------------
     # Higher-level helpers

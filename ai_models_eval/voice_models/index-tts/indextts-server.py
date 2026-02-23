@@ -149,15 +149,20 @@ async def stream_tts(request: web.Request) -> web.StreamResponse:
     await resp.prepare(request)
 
     try:
-        logger.info(
-            "TTS stream start: voice=%s text_len=%d", voice_id, len(text)
-        )
+        logger.info("TTS stream start: voice=%s text_len=%d", voice_id, len(text))
         async for chunk in engine.stream_wav(text, voice_path):
             await resp.write(chunk)
+        logger.info("TTS stream finished normally")
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        # Client disconnected (e.g. clicked Stop) — not an error
+        logger.info("TTS stream: client disconnected, stopping generation")
     except Exception:
         logger.exception("TTS streaming error")
     finally:
-        await resp.write_eof()
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass  # connection may already be closed
 
     return resp
 
