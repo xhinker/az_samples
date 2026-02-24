@@ -79,3 +79,7 @@ http://127.0.0.1:8080
 - [ ] update code `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/llm_audio_server.py` so that support voice input, using ASR service from `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-asr/qwen3-asr-server.py`. Follow the instruction like this: 
 * keep the current text input as it is, add a voice button to enable speech to text. 
 * When voice is enabled, if the voice pause for 2 seconds, the transcript text will be sent to LLM
+
+- [ ] make these two changes
+* enable https support
+* UI will send audio data to ASR service when pause for 800ms, or have more than 48 tokens. The 2 seconds pause wait is for LLM not for asr

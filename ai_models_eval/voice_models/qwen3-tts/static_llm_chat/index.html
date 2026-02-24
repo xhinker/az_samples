@@ -322,6 +322,36 @@
     #stop-btn:hover { opacity: .85; }
     #stop-btn.visible { display: block; }
 
+    /* ── Mic button ── */
+    #mic-btn {
+      background: var(--surface2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      align-self: flex-end;
+      height: 44px;
+      width: 44px;
+      padding: 0;
+      font-size: 1.2rem;
+      cursor: pointer;
+      transition: background .2s, border-color .2s;
+      flex-shrink: 0;
+    }
+    #mic-btn:hover { border-color: var(--accent); }
+    #mic-btn.voice-on {
+      background: #3a1010;
+      border-color: var(--red);
+      animation: mic-pulse 1.2s ease-in-out infinite;
+    }
+    #mic-btn.voice-processing {
+      background: var(--accent-dim);
+      border-color: var(--accent);
+    }
+    @keyframes mic-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(245,101,101,.5); }
+      50%       { box-shadow: 0 0 0 7px rgba(245,101,101,0); }
+    }
+
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -426,6 +456,7 @@
 
     <div class="input-bar">
       <textarea id="user-input" placeholder="Type your message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+      <button id="mic-btn" title="Enable voice input">🎤</button>
       <button id="send-btn">Send ▶</button>
       <button id="stop-btn">Stop ■</button>
     </div>
@@ -441,6 +472,7 @@
   const inputEl      = document.getElementById('user-input');
   const sendBtn      = document.getElementById('send-btn');
   const stopBtn      = document.getElementById('stop-btn');
+  const micBtn       = document.getElementById('mic-btn');
   const statusBadge  = document.getElementById('status-badge');
   const volumeSlider = document.getElementById('volume');
   const volumeLabel  = document.getElementById('volume-label');
@@ -470,6 +502,7 @@
   let cursorEl        = null;
   let refAudioBase64  = null; // user-uploaded reference audio (base64)
   let serverRefOk     = false;
+  let pendingVoiceTranscript = null; // transcript queued while LLM is busy
 
   // ── Audio helpers ─────────────────────────────────────────────────────────
   function ensureAudioCtx() {
@@ -652,6 +685,13 @@
     if (!active) {
       stopAudioIndicator();
       setStatus('Idle', '');
+      if (pendingVoiceTranscript) {
+        const t = pendingVoiceTranscript;
+        pendingVoiceTranscript = null;
+        inputEl.value = t;
+        autoResize();
+        send();
+      }
     }
   }
 
@@ -668,7 +708,7 @@
     setActiveUI(true);
     nextPlayTime = 0;
 
-    const wsUrl = `ws://${location.host}/ws/chat`;
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/chat`;
     ws = new WebSocket(wsUrl);
 
     ws.addEventListener('open', () => {
@@ -801,6 +841,203 @@
   });
 
   sendBtn.addEventListener('click', send);
+
+  // ── Voice Input ───────────────────────────────────────────────────────────
+  const SPEECH_THRESHOLD = 0.018; // RMS level considered as speech
+  const ASR_SILENCE_MS   = 800;   // ms of silence → flush audio to ASR
+  const LLM_SILENCE_MS   = 2000;  // ms of silence → send transcript to LLM
+  const ASR_CHUNK_MAX    = 48;    // force-flush after this many 100 ms chunks
+
+  let voiceOn         = false;
+  let micStream       = null;
+  let micAudioCtx     = null;
+  let vadAnalyser     = null;
+  let vadRunning      = false;
+  let mediaRecorder   = null;
+  let audioChunks     = [];
+  let speechDetected  = false;
+  let isProcessingASR = false;
+  let transcriptAccum = '';   // accumulated text within one utterance
+  let pendingLLMSend  = false;
+  let asrFlushTimer   = null; // 800 ms silence → ASR
+  let llmSendTimer    = null; // 2 s silence → LLM
+
+  function updateMicBtn() {
+    micBtn.classList.remove('voice-on', 'voice-processing');
+    if (!voiceOn) {
+      micBtn.textContent = '🎤';
+      micBtn.title = 'Enable voice input';
+    } else if (isProcessingASR) {
+      micBtn.textContent = '⏳';
+      micBtn.classList.add('voice-processing');
+      micBtn.title = 'Transcribing…';
+    } else {
+      micBtn.textContent = '🔴';
+      micBtn.classList.add('voice-on');
+      micBtn.title = 'Voice active — click to stop';
+    }
+  }
+
+  function startNewRecorder() {
+    audioChunks = [];
+    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : 'audio/webm';
+    mediaRecorder = new MediaRecorder(micStream, { mimeType: mime });
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.start(100);
+  }
+
+  function startVADLoop() {
+    vadRunning = true;
+    const buf = new Uint8Array(vadAnalyser.frequencyBinCount);
+    function tick() {
+      if (!vadRunning) return;
+      vadAnalyser.getByteTimeDomainData(buf);
+      let s = 0;
+      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
+      const rms = Math.sqrt(s / buf.length);
+
+      if (rms > SPEECH_THRESHOLD) {
+        speechDetected = true;
+        if (asrFlushTimer) { clearTimeout(asrFlushTimer); asrFlushTimer = null; }
+        if (llmSendTimer)  { clearTimeout(llmSendTimer);  llmSendTimer  = null; }
+        pendingLLMSend = false;
+      } else if (speechDetected) {
+        // 800 ms silence → send to ASR
+        if (!asrFlushTimer && !isProcessingASR) {
+          asrFlushTimer = setTimeout(() => { asrFlushTimer = null; flushToASR(); }, ASR_SILENCE_MS);
+        }
+        // 2 s silence → send accumulated transcript to LLM
+        if (!llmSendTimer) {
+          llmSendTimer = setTimeout(() => {
+            llmSendTimer = null;
+            if (isProcessingASR) { pendingLLMSend = true; }
+            else if (transcriptAccum.trim()) { submitToLLM(); }
+            else { speechDetected = false; }
+          }, LLM_SILENCE_MS);
+        }
+      }
+
+      // Force-flush if buffer exceeds max chunks (long utterance)
+      if (speechDetected && !isProcessingASR && audioChunks.length >= ASR_CHUNK_MAX) {
+        if (asrFlushTimer) { clearTimeout(asrFlushTimer); asrFlushTimer = null; }
+        flushToASR();
+      }
+
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  async function flushToASR() {
+    if (!voiceOn || isProcessingASR || !mediaRecorder || mediaRecorder.state !== 'recording') return;
+    if (audioChunks.length === 0) return;
+
+    isProcessingASR = true;
+    updateMicBtn();
+
+    // Snapshot current chunks; override handler to capture final ondataavailable on stop
+    const capturedChunks = audioChunks;
+    const mimeType = mediaRecorder.mimeType || 'audio/webm';
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) capturedChunks.push(e.data); };
+    await new Promise(resolve => {
+      mediaRecorder.addEventListener('stop', resolve, { once: true });
+      mediaRecorder.stop();
+    });
+
+    // Restart recorder immediately so no speech is missed while ASR runs
+    if (voiceOn) startNewRecorder();
+
+    const blob = new Blob(capturedChunks, { type: mimeType });
+    if (blob.size > 1000) {
+      try {
+        const form = new FormData();
+        form.append('audio', blob, 'voice.webm');
+        const res = await fetch('/api/asr/transcribe', { method: 'POST', body: form });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        const t = (json.text || '').trim();
+        if (t) transcriptAccum += (transcriptAccum ? ' ' : '') + t;
+      } catch (err) {
+        appendSystemMsg('ASR error: ' + err.message, true);
+      }
+    }
+
+    isProcessingASR = false;
+    updateMicBtn();
+
+    // If the 2 s LLM timer already fired while ASR was running, submit now
+    if (voiceOn && pendingLLMSend && transcriptAccum.trim()) {
+      pendingLLMSend = false;
+      submitToLLM();
+    }
+  }
+
+  function submitToLLM() {
+    const text = transcriptAccum.trim();
+    transcriptAccum = '';
+    speechDetected = false;
+    pendingLLMSend = false;
+    if (!text) return;
+    if (!isActive) {
+      inputEl.value = text;
+      autoResize();
+      send();
+    } else {
+      pendingVoiceTranscript = (pendingVoiceTranscript ? pendingVoiceTranscript + ' ' : '') + text;
+      const preview = text.length > 60 ? text.substring(0, 60) + '…' : text;
+      appendSystemMsg('🎤 "' + preview + '" — queued, will send after LLM responds.');
+    }
+  }
+
+  async function startVoice() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      appendSystemMsg('Voice input requires a secure context (HTTPS or localhost).', true);
+      return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    } catch (err) {
+      appendSystemMsg('Microphone access failed: ' + err.message, true);
+      return;
+    }
+    voiceOn = true;
+    speechDetected = false;
+    transcriptAccum = '';
+    pendingLLMSend = false;
+    asrFlushTimer = null;
+    llmSendTimer = null;
+    isProcessingASR = false;
+    micAudioCtx = new AudioContext();
+    const src = micAudioCtx.createMediaStreamSource(micStream);
+    vadAnalyser = micAudioCtx.createAnalyser();
+    vadAnalyser.fftSize = 512;
+    src.connect(vadAnalyser);
+    startNewRecorder();
+    startVADLoop();
+    updateMicBtn();
+    appendSystemMsg('Voice enabled — speak, auto-sends after 2 s of silence.');
+  }
+
+  function stopVoice() {
+    voiceOn = false;
+    vadRunning = false;
+    clearTimeout(asrFlushTimer); asrFlushTimer = null;
+    clearTimeout(llmSendTimer);  llmSendTimer  = null;
+    pendingLLMSend = false;
+    transcriptAccum = '';
+    speechDetected = false;
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    mediaRecorder = null;
+    audioChunks = [];
+    if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; vadAnalyser = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    isProcessingASR = false;
+    updateMicBtn();
+    appendSystemMsg('Voice input disabled.');
+  }
+
+  micBtn.addEventListener('click', () => { if (voiceOn) stopVoice(); else startVoice(); });
 
   // Initial focus
   inputEl.focus();
