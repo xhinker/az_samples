@@ -485,7 +485,7 @@ let sampleRate   = 44100;
 let cursorEl     = null;   // the blinking cursor element in the transcript
 
 /* ── VAD state ────────────────────────────────────────────────────── */
-const VAD_THRESHOLD    = 0.07;   // RMS level that counts as "voice"
+const VAD_THRESHOLD    = 0.03;   // RMS level that counts as "voice"
 const SILENCE_MS       = 800;     // ms of continuous silence → flush sentence
 const MAX_VOICE_SEC    = 15;      // force-flush after this many seconds of voice
 let   vadActive        = false;   // currently inside a voiced segment
