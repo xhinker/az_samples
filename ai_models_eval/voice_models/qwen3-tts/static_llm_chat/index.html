@@ -847,7 +847,7 @@
   // /api/asr/transcribe. WAV is natively decoded by soundfile — no ffmpeg needed.
   const SPEECH_THRESHOLD = 0.018; // RMS level considered as speech
   const ASR_SILENCE_MS   = 800;   // ms of silence → flush audio to ASR
-  const LLM_SILENCE_MS   = 2000;  // ms of silence → send transcript to LLM
+  const LLM_SILENCE_MS   = 1500;  // ms of silence → send transcript to LLM
   const ASR_CHUNK_MAX    = 48;    // force-flush after this many ScriptProcessor buffers
   const SCRIPT_BUF       = 4096;  // ScriptProcessorNode buffer size (samples)
 
@@ -906,6 +906,23 @@
     }
   }
 
+  // Stop ongoing TTS playback when the user starts speaking.
+  function interruptActiveTTS() {
+    if (!isActive) return;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'stop' }));
+    if (audioCtx) {
+      gainNode.disconnect();
+      gainNode = audioCtx.createGain();
+      gainNode.gain.value = parseFloat(volumeSlider.value);
+      gainNode.connect(audioCtx.destination);
+      nextPlayTime = 0;
+    }
+    stopAudioIndicator();
+    finalizeAiMsg('');
+    setStatus('Interrupted', '');
+    setActiveUI(false);
+  }
+
   async function flushToASR() {
     if (!voiceOn || isProcessingASR || localChunks.length === 0) return;
     isProcessingASR = true;
@@ -925,7 +942,9 @@
         const res = await fetch('/api/asr/transcribe', { method: 'POST', body: form });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const j = await res.json();
-        const t = (j.text || '').trim();
+        const raw = (j.text || '').trim();
+        // Strip "language English<asr_text>" prefix emitted by Qwen3-ASR in auto-detect mode
+        const t = raw.replace(/^language\s+\w+(<asr_text>)?\s*/i, '').trim();
         if (t) transcriptAccum += (transcriptAccum ? ' ' : '') + t;
       } catch (err) {
         appendSystemMsg('ASR error: ' + err.message, true);
@@ -1003,6 +1022,7 @@
       const rms = Math.sqrt(sum / samples.length);
 
       if (rms > SPEECH_THRESHOLD) {
+        if (!speechDetected) interruptActiveTTS(); // stop TTS on first speech frame
         speechDetected    = true;
         localChunks.push(samples);
         localSampleCount += samples.length;
