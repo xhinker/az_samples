@@ -1,0 +1,32 @@
+[
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_ch_1.wav"
+  },
+  {
+    "role": "古曼",
+    "gender": "female",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_ch_2.wav"
+  },
+  {
+    "role": "亚男",
+    "gender": "female",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_ch_3.wav"
+  },
+  {
+    "role": "桑影",
+    "gender": "female",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_ch_4.wav"
+  },
+  {
+    "role": "傅蕾",
+    "gender": "female",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_en_1.wav"
+  },
+  {
+    "role": "柳茹",
+    "gender": "female",
+    "audio_file": "/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/role_voices/female_en_2.wav"
+  }
+]

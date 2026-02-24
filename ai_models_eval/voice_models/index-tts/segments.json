@@ -1,0 +1,163 @@
+[
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "calm",
+    "type": "narrator",
+    "text": "第12章 黎男的秘密"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "reflective",
+    "type": "narrator",
+    "text": "“你知道吗？我曾经幻想过那种黑道般的日子。男朋友是个黑社会的小头目，而我则成天跟在他身边，全身黑色皮衣、皮裤，骑着摩托车，在大街小巷窜来窜去。逢人便被称呼什么什么嫂啊的，比如男朋友是豹哥，我就是豹嫂。想想，多带劲啊！”"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "melancholy",
+    "type": "narrator",
+    "text": "古曼走了"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "time-passing",
+    "type": "narrator",
+    "text": "时间，跑得太快了，以至于一不留神，它便从你身边一晃而过，不留一点痕迹。一眨眼，几个月又过去了。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "routine",
+    "type": "narrator",
+    "text": "这天下午，我正在宿舍洗衣服，忽然，电话响了，是古曼打来的。"
+  },
+  {
+    "role": "古曼",
+    "gender": "female",
+    "emotion": "cheerful",
+    "type": "dialog",
+    "text": "“若狐，晚上出来吃饭，我已经约好大家了，除了小柠子有任务，其他姐妹都在。”"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "casual",
+    "type": "narrator",
+    "text": "小柠子，不知从何时起，姐妹们都这么叫木柠。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "agreeable",
+    "type": "narrator",
+    "text": "“好啊，我正洗衣服呢，一会儿我就去你宿舍找你。”"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "matter-of-fact",
+    "type": "narrator",
+    "text": "挂了电话，我看了看时间，五点一刻。黎男不在，执行航班任务去了。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "efficient",
+    "type": "narrator",
+    "text": "洗完衣服，我简单地收拾了一下，便去了古曼的宿舍，正好赶上姐妹们都在门口。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "enthusiastic",
+    "type": "narrator",
+    "text": "“走吧，咱们出去吃，边吃边聊。”"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "casual",
+    "type": "narrator",
+    "text": "不知不觉，大家逛到了一家叫“爬爬虾”的饭馆门口。"
+  },
+  {
+    "role": "亚男",
+    "gender": "female",
+    "emotion": "suggestive",
+    "type": "dialog",
+    "text": "“不如今天咱们吃虾吧！”"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "agreeing",
+    "type": "narrator",
+    "text": "姐妹都点了点头，据说这家店的味道不错，从现在就宾客盈门的情况看来，味道应该不会差。我们选了二楼一个靠窗的角落处，坐了下来。"
+  },
+  {
+    "role": "桑影",
+    "gender": "female",
+    "emotion": "curious",
+    "type": "dialog",
+    "text": "“亚男，飞国际很累吧？”桑影首先打开了话匣子。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "tense",
+    "type": "narrator",
+    "text": "这阵子大家都很忙，几乎连照面也很困难。"
+  },
+  {
+    "role": "亚男",
+    "gender": "female",
+    "emotion": "exhausted",
+    "type": "dialog",
+    "text": "“是啊，国际国内连续倒班，根本倒不过来，我都累趴下了，只想公司能好好地放我几天假，让我睡个饱。”亚男一副苦大仇深的样子。"
+  },
+  {
+    "role": "傅蕾",
+    "gender": "female",
+    "emotion": "sarcastic",
+    "type": "dialog",
+    "text": "“你做梦吧，想放假，等明年的年休假吧。”"
+  },
+  {
+    "role": "柳茹",
+    "gender": "female",
+    "emotion": "angry",
+    "type": "dialog",
+    "text": "“这狗屁破公司，就算是机器也该有休息的时候，还真不把我们当人了。”柳茹破口大骂起来。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "resigned",
+    "type": "narrator",
+    "text": "骂，确实该骂。对于我们，能做的，也只能如此骂骂，发泄一下而已。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "quiet",
+    "type": "narrator",
+    "text": "大家默默吃着饭。"
+  },
+  {
+    "role": "Narrator",
+    "gender": "neutral",
+    "emotion": "sudden-realization",
+    "type": "narrator",
+    "text": "这时，傅蕾突然想起了什么。"
+  },
+  {
+    "role": "傅蕾",
+    "gender": "female",
+    "emotion": "reminding",
+    "type": "dialog",
+    "text": "“对了，小曼，你不是说有事跟大家说吗？什么事？”傅蕾问道。"
+  }
+]

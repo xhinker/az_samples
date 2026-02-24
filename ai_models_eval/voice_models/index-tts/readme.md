@@ -8,7 +8,7 @@
     * Use Python venv: `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/index-tts/indextts-venv-py311`
     * API use 8085 port, web server use 8086 port
  
-- [ ] I want to build a ebook reader with role play sounds, so that different role will use different role sound as reference audio for indextts 
+- [x] I want to build a ebook reader with role play sounds, so that different role will use different role sound as reference audio for indextts 
 * now build a text processor `text_processor.py` using LLM to convert text to a list of json object like this: 
 ```json
 [
