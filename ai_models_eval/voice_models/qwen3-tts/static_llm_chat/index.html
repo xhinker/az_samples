@@ -842,25 +842,53 @@
 
   sendBtn.addEventListener('click', send);
 
-  // ── Voice Input ───────────────────────────────────────────────────────────
+  // ── Voice Input (ScriptProcessorNode + PCM16 WAV) ────────────────────────────
+  // Records raw float32 PCM via ScriptProcessorNode, encodes as WAV, POSTs to
+  // /api/asr/transcribe. WAV is natively decoded by soundfile — no ffmpeg needed.
   const SPEECH_THRESHOLD = 0.018; // RMS level considered as speech
   const ASR_SILENCE_MS   = 800;   // ms of silence → flush audio to ASR
   const LLM_SILENCE_MS   = 2000;  // ms of silence → send transcript to LLM
-  const ASR_CHUNK_MAX    = 48;    // force-flush after this many 100 ms chunks
+  const ASR_CHUNK_MAX    = 48;    // force-flush after this many ScriptProcessor buffers
+  const SCRIPT_BUF       = 4096;  // ScriptProcessorNode buffer size (samples)
 
   let voiceOn         = false;
   let micStream       = null;
   let micAudioCtx     = null;
-  let vadAnalyser     = null;
-  let vadRunning      = false;
-  let mediaRecorder   = null;
-  let audioChunks     = [];
+  let scriptProc      = null;
+  let nativeSR        = 44100;  // updated to AudioContext.sampleRate on start
   let speechDetected  = false;
   let isProcessingASR = false;
-  let transcriptAccum = '';   // accumulated text within one utterance
+  let localChunks     = [];     // Float32Array chunks buffered since last flush
+  let localSampleCount = 0;
+  let transcriptAccum = '';     // accumulated transcript within one utterance
   let pendingLLMSend  = false;
-  let asrFlushTimer   = null; // 800 ms silence → ASR
-  let llmSendTimer    = null; // 2 s silence → LLM
+  let asrFlushTimer   = null;   // 800 ms silence → ASR
+  let llmSendTimer    = null;   // 2 s silence → LLM
+
+  // Encode an array of Float32Array chunks into a PCM-16 WAV Blob.
+  function encodeWAV(chunks, sampleRate) {
+    let totalLen = 0;
+    for (const c of chunks) totalLen += c.length;
+    const f32 = new Float32Array(totalLen);
+    let off = 0;
+    for (const c of chunks) { f32.set(c, off); off += c.length; }
+    const pcm16 = new Int16Array(totalLen);
+    for (let i = 0; i < totalLen; i++) {
+      const s = Math.max(-1, Math.min(1, f32[i]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    const dataLen = pcm16.byteLength;
+    const buf = new ArrayBuffer(44 + dataLen);
+    const v   = new DataView(buf);
+    const ws  = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    ws(0, 'RIFF'); v.setUint32(4, 36 + dataLen, true); ws(8, 'WAVE');
+    ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    ws(36, 'data'); v.setUint32(40, dataLen, true);
+    new Uint8Array(buf, 44).set(new Uint8Array(pcm16.buffer));
+    return new Blob([buf], { type: 'audio/wav' });
+  }
 
   function updateMicBtn() {
     micBtn.classList.remove('voice-on', 'voice-processing');
@@ -878,85 +906,26 @@
     }
   }
 
-  function startNewRecorder() {
-    audioChunks = [];
-    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus' : 'audio/webm';
-    mediaRecorder = new MediaRecorder(micStream, { mimeType: mime });
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.start(100);
-  }
-
-  function startVADLoop() {
-    vadRunning = true;
-    const buf = new Uint8Array(vadAnalyser.frequencyBinCount);
-    function tick() {
-      if (!vadRunning) return;
-      vadAnalyser.getByteTimeDomainData(buf);
-      let s = 0;
-      for (let i = 0; i < buf.length; i++) { const v = (buf[i] - 128) / 128; s += v * v; }
-      const rms = Math.sqrt(s / buf.length);
-
-      if (rms > SPEECH_THRESHOLD) {
-        speechDetected = true;
-        if (asrFlushTimer) { clearTimeout(asrFlushTimer); asrFlushTimer = null; }
-        if (llmSendTimer)  { clearTimeout(llmSendTimer);  llmSendTimer  = null; }
-        pendingLLMSend = false;
-      } else if (speechDetected) {
-        // 800 ms silence → send to ASR
-        if (!asrFlushTimer && !isProcessingASR) {
-          asrFlushTimer = setTimeout(() => { asrFlushTimer = null; flushToASR(); }, ASR_SILENCE_MS);
-        }
-        // 2 s silence → send accumulated transcript to LLM
-        if (!llmSendTimer) {
-          llmSendTimer = setTimeout(() => {
-            llmSendTimer = null;
-            if (isProcessingASR) { pendingLLMSend = true; }
-            else if (transcriptAccum.trim()) { submitToLLM(); }
-            else { speechDetected = false; }
-          }, LLM_SILENCE_MS);
-        }
-      }
-
-      // Force-flush if buffer exceeds max chunks (long utterance)
-      if (speechDetected && !isProcessingASR && audioChunks.length >= ASR_CHUNK_MAX) {
-        if (asrFlushTimer) { clearTimeout(asrFlushTimer); asrFlushTimer = null; }
-        flushToASR();
-      }
-
-      requestAnimationFrame(tick);
-    }
-    requestAnimationFrame(tick);
-  }
-
   async function flushToASR() {
-    if (!voiceOn || isProcessingASR || !mediaRecorder || mediaRecorder.state !== 'recording') return;
-    if (audioChunks.length === 0) return;
-
+    if (!voiceOn || isProcessingASR || localChunks.length === 0) return;
     isProcessingASR = true;
     updateMicBtn();
 
-    // Snapshot current chunks; override handler to capture final ondataavailable on stop
-    const capturedChunks = audioChunks;
-    const mimeType = mediaRecorder.mimeType || 'audio/webm';
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) capturedChunks.push(e.data); };
-    await new Promise(resolve => {
-      mediaRecorder.addEventListener('stop', resolve, { once: true });
-      mediaRecorder.stop();
-    });
+    // Snapshot and reset the buffer atomically before the async POST
+    const chunks = localChunks;
+    const sr     = nativeSR;
+    localChunks      = [];
+    localSampleCount = 0;
 
-    // Restart recorder immediately so no speech is missed while ASR runs
-    if (voiceOn) startNewRecorder();
-
-    const blob = new Blob(capturedChunks, { type: mimeType });
-    if (blob.size > 1000) {
+    const wav = encodeWAV(chunks, sr);
+    if (wav.size > 1000) {
       try {
         const form = new FormData();
-        form.append('audio', blob, 'voice.webm');
+        form.append('audio', wav, 'voice.wav');
         const res = await fetch('/api/asr/transcribe', { method: 'POST', body: form });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
-        const t = (json.text || '').trim();
+        const j = await res.json();
+        const t = (j.text || '').trim();
         if (t) transcriptAccum += (transcriptAccum ? ' ' : '') + t;
       } catch (err) {
         appendSystemMsg('ASR error: ' + err.message, true);
@@ -966,18 +935,21 @@
     isProcessingASR = false;
     updateMicBtn();
 
-    // If the 2 s LLM timer already fired while ASR was running, submit now
+    // If the 2 s LLM timer fired while ASR was running, submit now
     if (voiceOn && pendingLLMSend && transcriptAccum.trim()) {
       pendingLLMSend = false;
       submitToLLM();
+    } else if (voiceOn && localChunks.length > 0 && !asrFlushTimer) {
+      // Flush any chunks that accumulated while ASR was processing
+      asrFlushTimer = setTimeout(() => { asrFlushTimer = null; flushToASR(); }, ASR_SILENCE_MS);
     }
   }
 
   function submitToLLM() {
     const text = transcriptAccum.trim();
     transcriptAccum = '';
-    speechDetected = false;
-    pendingLLMSend = false;
+    speechDetected  = false;
+    pendingLLMSend  = false;
     if (!text) return;
     if (!isActive) {
       inputEl.value = text;
@@ -1001,37 +973,83 @@
       appendSystemMsg('Microphone access failed: ' + err.message, true);
       return;
     }
-    voiceOn = true;
-    speechDetected = false;
-    transcriptAccum = '';
-    pendingLLMSend = false;
-    asrFlushTimer = null;
-    llmSendTimer = null;
-    isProcessingASR = false;
+    voiceOn          = true;
+    speechDetected   = false;
+    transcriptAccum  = '';
+    pendingLLMSend   = false;
+    asrFlushTimer    = null;
+    llmSendTimer     = null;
+    isProcessingASR  = false;
+    localChunks      = [];
+    localSampleCount = 0;
+
     micAudioCtx = new AudioContext();
-    const src = micAudioCtx.createMediaStreamSource(micStream);
-    vadAnalyser = micAudioCtx.createAnalyser();
-    vadAnalyser.fftSize = 512;
-    src.connect(vadAnalyser);
-    startNewRecorder();
-    startVADLoop();
+    nativeSR    = micAudioCtx.sampleRate;
+    const src   = micAudioCtx.createMediaStreamSource(micStream);
+    scriptProc  = micAudioCtx.createScriptProcessor(SCRIPT_BUF, 1, 1);
+
+    // Route through a silent gain so ScriptProcessorNode fires without speaker feedback
+    const silentGain = micAudioCtx.createGain();
+    silentGain.gain.value = 0;
+    src.connect(scriptProc);
+    scriptProc.connect(silentGain);
+    silentGain.connect(micAudioCtx.destination);
+
+    scriptProc.onaudioprocess = (ev) => {
+      if (!voiceOn) return;
+      const samples = ev.inputBuffer.getChannelData(0).slice(); // copy Float32Array
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+      const rms = Math.sqrt(sum / samples.length);
+
+      if (rms > SPEECH_THRESHOLD) {
+        speechDetected    = true;
+        localChunks.push(samples);
+        localSampleCount += samples.length;
+        // Cancel silence timers while speech is ongoing
+        if (asrFlushTimer) { clearTimeout(asrFlushTimer); asrFlushTimer = null; }
+        if (llmSendTimer)  { clearTimeout(llmSendTimer);  llmSendTimer  = null; }
+        pendingLLMSend = false;
+        // Force-flush on very long utterance
+        if (!isProcessingASR && localChunks.length >= ASR_CHUNK_MAX) {
+          flushToASR();
+        }
+      } else if (speechDetected) {
+        // Silence after speech — keep buffering so we don't clip the tail
+        localChunks.push(samples);
+        localSampleCount += samples.length;
+        // 800 ms silence → send to ASR
+        if (!asrFlushTimer && !isProcessingASR) {
+          asrFlushTimer = setTimeout(() => { asrFlushTimer = null; flushToASR(); }, ASR_SILENCE_MS);
+        }
+        // 2 s silence → send accumulated transcript to LLM
+        if (!llmSendTimer) {
+          llmSendTimer = setTimeout(() => {
+            llmSendTimer = null;
+            if (isProcessingASR) { pendingLLMSend = true; }
+            else if (transcriptAccum.trim()) { submitToLLM(); }
+            else { speechDetected = false; }
+          }, LLM_SILENCE_MS);
+        }
+      }
+    };
+
     updateMicBtn();
     appendSystemMsg('Voice enabled — speak, auto-sends after 2 s of silence.');
   }
 
   function stopVoice() {
     voiceOn = false;
-    vadRunning = false;
     clearTimeout(asrFlushTimer); asrFlushTimer = null;
     clearTimeout(llmSendTimer);  llmSendTimer  = null;
-    pendingLLMSend = false;
-    transcriptAccum = '';
-    speechDetected = false;
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
-    mediaRecorder = null;
-    audioChunks = [];
-    if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; vadAnalyser = null; }
-    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    pendingLLMSend   = false;
+    transcriptAccum  = '';
+    speechDetected   = false;
+    localChunks      = [];
+    localSampleCount = 0;
+    if (scriptProc)  { scriptProc.disconnect(); scriptProc = null; }
+    if (micAudioCtx) { micAudioCtx.close(); micAudioCtx = null; }
+    if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
     isProcessingASR = false;
     updateMicBtn();
     appendSystemMsg('Voice input disabled.');

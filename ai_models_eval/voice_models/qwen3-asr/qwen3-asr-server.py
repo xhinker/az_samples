@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import ssl
-import subprocess
+import subprocess  # used only for openssl cert generation
 import sys
 from threading import Thread
 from typing import Optional
@@ -98,29 +98,13 @@ def load_model_sync() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def decode_audio_file(data: bytes) -> np.ndarray:
-    """Decode audio bytes to float32 mono @ 16 kHz.
-    Tries soundfile → librosa → ffmpeg (handles webm/opus from MediaRecorder)."""
+    """Decode an uploaded audio file (wav / mp3 / webm …) to float32 mono @ 16 kHz."""
     try:
         with io.BytesIO(data) as f:
             wav, sr = sf.read(f, dtype="float32", always_2d=False)
     except Exception:
-        try:
-            with io.BytesIO(data) as f:
-                wav, sr = librosa.load(f, sr=None, mono=True, dtype=np.float32)
-        except Exception:
-            # Final fallback: pipe through ffmpeg (handles webm/opus and other
-            # container formats that soundfile/librosa cannot decode natively).
-            proc = subprocess.run(
-                [
-                    "ffmpeg", "-i", "pipe:0",
-                    "-f", "f32le", "-ac", "1", "-ar", str(TARGET_SR),
-                    "-loglevel", "error", "pipe:1",
-                ],
-                input=data,
-                capture_output=True,
-                check=True,
-            )
-            return np.frombuffer(proc.stdout, dtype=np.float32).copy()
+        with io.BytesIO(data) as f:
+            wav, sr = librosa.load(f, sr=None, mono=True, dtype=np.float32)
     if wav.ndim > 1:
         wav = wav.mean(axis=-1)
     if sr != TARGET_SR:
