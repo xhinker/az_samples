@@ -65,8 +65,55 @@ For every distinct spoken unit in the source text, produce ONE JSON object:
   "text":    <the EXACT original text — do NOT paraphrase or summarise>
 }
 
-Rules
------
+═══════════════════════════════════════════════════════
+CRITICAL RULE — Chinese novel dialog-attribution split
+═══════════════════════════════════════════════════════
+In Chinese novels, a character's spoken words and the attribution (who said
+it / how) are often written ON THE SAME LINE with NO newline between them:
+
+    "台词内容。"角色名动词描述。
+
+You MUST split every such line into EXACTLY TWO segments:
+
+  Segment A — the spoken dialog:
+    {"role": "角色名", "type": "dialog",   "text": ""台词内容。""}
+
+  Segment B — the attribution (narration):
+    {"role": "Narrator", "type": "narrator", "text": "角色名动词描述。"}
+
+NEVER merge dialog text and its attribution into a single segment.
+
+────────────────────────────────────────────────────
+Chinese example — source line:
+  "不如今天咱们吃虾吧！"亚男提议道。
+
+WRONG (merged — DO NOT DO THIS):
+  {"role":"亚男","type":"dialog","text":""不如今天咱们吃虾吧！"亚男提议道。"}
+
+CORRECT (split into two):
+  {"role":"亚男",    "type":"dialog",   "text":""不如今天咱们吃虾吧！""},
+  {"role":"Narrator","type":"narrator", "text":"亚男提议道。"}
+
+────────────────────────────────────────────────────
+Another example — source line:
+  "对了，小曼，你不是说有事跟大家说吗？什么事？"傅蕾问道。
+
+CORRECT (split):
+  {"role":"傅蕾",    "type":"dialog",   "text":""对了，小曼，你不是说有事跟大家说吗？什么事？""},
+  {"role":"Narrator","type":"narrator", "text":"傅蕾问道。"}
+
+────────────────────────────────────────────────────
+Another example with longer attribution — source line:
+  "是啊，国际国内连续倒班，根本倒不过来，我都累趴下了。"亚男一副苦大仇深的样子。
+
+CORRECT (split):
+  {"role":"亚男",    "type":"dialog",   "text":""是啊，国际国内连续倒班，根本倒不过来，我都累趴下了。""},
+  {"role":"Narrator","type":"narrator", "text":"亚男一副苦大仇深的样子。"}
+
+════════════════════════════════════════════════════
+
+General rules
+─────────────
 1. "role":
    - Use the CHARACTER'S NAME for lines they speak (infer from dialogue attribution).
    - Use "Narrator" for all descriptive / narrative passages.
@@ -95,17 +142,17 @@ Rules
 
 7. Return ONLY a valid JSON array — no markdown fences, no commentary, no extra keys.
 
-Good example
-------------
+Good general example
+────────────────────
 [
   {"role":"Narrator","gender":"neutral","emotion":"tense","type":"narrator",
    "text":"The tavern door swung open with a crash."},
   {"role":"Environment","gender":"neutral","emotion":"dramatic","type":"environment_sound",
    "text":"*Wind howled through the gap.*"},
   {"role":"Innkeeper","gender":"male","emotion":"irritated","type":"dialog",
-   "text":"\"We're closed!\" he barked."},
+   "text":"We're closed! he barked."},
   {"role":"Lyra","gender":"female","emotion":"confident","type":"dialog",
-   "text":"\"Not for me, you're not.\""}
+   "text":"Not for me, you're not."}
 ]
 """
 
@@ -145,6 +192,93 @@ def _normalize_segment(seg: dict[str, Any]) -> dict[str, str]:
     }
 
 
+# ── Post-processing: split dialog + attribution ───────────────────────────────
+
+# Chinese opening/closing quotation marks used in novels
+_OPEN_QUOTES  = "\u201c\u300c\u300e"   # " 「 『
+_CLOSE_QUOTES = "\u201d\u300d\u300f"   # " 」 』
+
+# Pattern: a segment whose text is exactly  "dialog"attribution
+# Group 1 = the fully-quoted dialog (opening quote … closing quote)
+# Group 2 = the attribution text after the closing quote (≥ 2 chars)
+_DIALOG_ATTR_RE = re.compile(
+    r"^([" + re.escape(_OPEN_QUOTES) + r"]"      # opening quote
+    r"[^" + re.escape(_CLOSE_QUOTES) + r"]*"     # dialog content (no closing quote inside)
+    r"[" + re.escape(_CLOSE_QUOTES) + r"])"      # closing quote
+    r"(\S.+)$",                                   # attribution (starts with non-whitespace)
+    re.DOTALL,
+)
+
+
+def _split_dialog_attribution(
+    segment: dict[str, str],
+    known_roles: dict[str, str],   # role_name → gender
+) -> list[dict[str, str]]:
+    """
+    If *segment*'s text matches the Chinese pattern "dialog"attribution,
+    return two segments: a dialog segment and a narrator attribution segment.
+
+    The speaker is determined from:
+      1. segment["role"] if it is already a named character (not Narrator/Environment), OR
+      2. Scanning the start of the attribution text for a known character name.
+
+    Returns the original segment unchanged if the pattern does not match or
+    the speaker cannot be determined.
+    """
+    text = segment.get("text", "").strip()
+    m = _DIALOG_ATTR_RE.match(text)
+    if not m:
+        return [segment]
+
+    dialog_part = m.group(1).strip()
+    attr_part   = m.group(2).strip()
+
+    # Attribution must be substantial enough to be its own segment
+    if len(attr_part) < 2:
+        return [segment]
+
+    seg_role    = segment.get("role", "Narrator")
+    seg_gender  = segment.get("gender", "neutral")
+    seg_emotion = segment.get("emotion", "neutral")
+
+    # Case A: LLM already assigned a named character — split cleanly
+    if seg_role not in ("Narrator", "Environment"):
+        speaker_role   = seg_role
+        speaker_gender = seg_gender
+    else:
+        # Case B: LLM assigned Narrator — try to find the speaker name at the
+        # start of the attribution text by matching against known character names.
+        # Sort by length descending so longer names are tried first (避免前缀误匹配).
+        speaker_role   = None
+        speaker_gender = "neutral"
+        for role in sorted(known_roles, key=len, reverse=True):
+            if attr_part.startswith(role):
+                speaker_role   = role
+                speaker_gender = known_roles[role]
+                break
+
+        if speaker_role is None:
+            # Cannot determine speaker — leave segment untouched
+            return [segment]
+
+    return [
+        {
+            "role":    speaker_role,
+            "gender":  speaker_gender,
+            "emotion": seg_emotion,
+            "type":    "dialog",
+            "text":    dialog_part,
+        },
+        {
+            "role":    "Narrator",
+            "gender":  "neutral",
+            "emotion": "neutral",
+            "type":    "narrator",
+            "text":    attr_part,
+        },
+    ]
+
+
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class TextProcessor:
@@ -181,10 +315,16 @@ class TextProcessor:
         """
         Segment *text* into speech units.
 
+        Steps
+        -----
+        1. Split large text into paragraph-boundary chunks.
+        2. Send each chunk to the LLM and collect normalised segments.
+        3. Post-process: split any "dialog"attribution combos the LLM missed.
+
         Returns
         -------
         list[dict]
-            List of normalised segment dicts (role / gender / emotion / type / text).
+            List of normalized segment dicts (role / gender / emotion / type / text).
         """
         chunks = self._split_into_chunks(text)
         total  = len(chunks)
@@ -195,8 +335,28 @@ class TextProcessor:
             segments = self._call_llm(chunk)
             all_segments.extend(segments)
 
-        print(f"  Done. {len(all_segments)} segments extracted.")
-        return all_segments
+        # Build a role→gender map from all LLM-assigned named characters so
+        # the post-processor can identify speakers from attribution text.
+        known_roles: dict[str, str] = {
+            seg["role"]: seg.get("gender", "neutral")
+            for seg in all_segments
+            if seg.get("role") not in ("Narrator", "Environment", "")
+        }
+
+        # Post-process: split "dialog"attribution segments the LLM merged
+        post_processed: list[dict[str, str]] = []
+        split_count = 0
+        for seg in all_segments:
+            parts = _split_dialog_attribution(seg, known_roles)
+            post_processed.extend(parts)
+            if len(parts) > 1:
+                split_count += 1
+
+        if split_count:
+            print(f"  Post-processed: split {split_count} dialog+attribution segment(s).")
+
+        print(f"  Done. {len(post_processed)} segments total.")
+        return post_processed
 
     def save_segments(self, segments: list[dict], path: str) -> None:
         """Write the segment list to *path* as pretty-printed JSON."""
