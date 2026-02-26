@@ -42,6 +42,7 @@ import logging
 import os
 import struct
 import threading
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import web
@@ -84,6 +85,11 @@ OPENAI_VOICE_MAP: dict[str, str] = {
 }
 
 SUPPORTED_FORMATS = {"pcm", "wav", "mp3"}
+
+# Default reference voice (relative to this file)
+_SCRIPT_DIR = Path(__file__).parent
+DEFAULT_REF_AUDIO_PATH = _SCRIPT_DIR / "role_voices" / "female_ch_1.wav"
+DEFAULT_REF_TEXT_PATH = _SCRIPT_DIR / "role_voices" / "female_ch_1.txt"
 
 
 def _wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16, data_size: int = 0xFFFFFFFF) -> bytes:
@@ -185,9 +191,10 @@ async def speech_handler(request: web.Request) -> web.Response:
             status=400,
         )
 
-    # Decide mode: voice_clone when reference audio + text are both provided
+    # Decide mode: voice_clone when reference audio + text are provided (or defaults exist)
     reference_audio_bytes: Optional[bytes] = None
     if reference_audio_b64 and reference_text:
+        # Caller supplied reference explicitly
         try:
             reference_audio_bytes = base64.b64decode(reference_audio_b64)
         except Exception:
@@ -197,6 +204,12 @@ async def speech_handler(request: web.Request) -> web.Response:
             )
         mode = "voice_clone"
         qwen_speaker = DEFAULT_SPEAKER  # not used in voice_clone mode
+    elif request.app.get("default_ref_audio") and request.app.get("default_ref_text"):
+        # Fall back to server-side default reference voice
+        reference_audio_bytes = request.app["default_ref_audio"]
+        reference_text = request.app["default_ref_text"]
+        mode = "voice_clone"
+        qwen_speaker = DEFAULT_SPEAKER
     else:
         mode = "custom_voice"
         # Map OpenAI voice name to Qwen3 speaker
@@ -366,12 +379,46 @@ async def speech_handler(request: web.Request) -> web.Response:
         )
 
 
+def _load_default_ref(
+    ref_audio: Optional[str],
+    ref_text: Optional[str],
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Load default reference audio bytes and text from paths.  Returns (None, None) on failure."""
+    audio_path = Path(ref_audio) if ref_audio else DEFAULT_REF_AUDIO_PATH
+    text_path = Path(ref_text) if ref_text else DEFAULT_REF_TEXT_PATH
+
+    audio_bytes: Optional[bytes] = None
+    text_str: Optional[str] = None
+
+    if audio_path.exists():
+        audio_bytes = audio_path.read_bytes()
+        logger.info("Loaded default reference audio: %s (%d bytes)", audio_path, len(audio_bytes))
+    else:
+        logger.warning("Default reference audio not found: %s", audio_path)
+
+    if text_path.exists():
+        text_str = text_path.read_text(encoding="utf-8").strip()
+        logger.info("Loaded default reference text: %s → %r", text_path, text_str)
+    elif ref_text and not Path(ref_text).suffix:
+        # Treat ref_text as a literal string rather than a path
+        text_str = ref_text.strip()
+        logger.info("Using literal default reference text: %r", text_str)
+    else:
+        logger.warning("Default reference text not found: %s", text_path)
+
+    if audio_bytes and text_str:
+        return audio_bytes, text_str
+    return None, None
+
+
 def build_app(
     custom_model_id: str,
     voice_clone_model_id: str,
     device: str,
     dtype: str,
     attn_implementation: str,
+    default_ref_audio: Optional[str] = None,
+    default_ref_text: Optional[str] = None,
 ) -> web.Application:
     app = web.Application(client_max_size=10 * 1024 * 1024)
     app["service"] = QwenStreamingService(
@@ -381,6 +428,10 @@ def build_app(
         dtype=dtype,
         attn_implementation=attn_implementation,
     )
+
+    ref_audio_bytes, ref_text_str = _load_default_ref(default_ref_audio, default_ref_text)
+    app["default_ref_audio"] = ref_audio_bytes
+    app["default_ref_text"] = ref_text_str
 
     app.router.add_get("/health", health_handler)
     app.router.add_get("/v1/models", models_handler)
@@ -414,6 +465,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dtype", default=os.environ.get("QWEN_TTS_DTYPE", "bfloat16"))
     parser.add_argument("--attn-implementation", default=os.environ.get("QWEN_TTS_ATTN_IMPL", "flash_attention_2"))
+    parser.add_argument(
+        "--default-ref-audio",
+        default=os.environ.get("QWEN_TTS_DEFAULT_REF_AUDIO", None),
+        help=f"Path to default reference WAV for voice_clone mode (default: {DEFAULT_REF_AUDIO_PATH})",
+    )
+    parser.add_argument(
+        "--default-ref-text",
+        default=os.environ.get("QWEN_TTS_DEFAULT_REF_TEXT", None),
+        help=f"Path to .txt file (or literal text) for default reference transcript (default: {DEFAULT_REF_TEXT_PATH})",
+    )
     return parser.parse_args()
 
 
@@ -429,6 +490,8 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         attn_implementation=args.attn_implementation,
+        default_ref_audio=args.default_ref_audio,
+        default_ref_text=args.default_ref_text,
     )
     web.run_app(app, host=args.host, port=args.port)
 
