@@ -84,6 +84,13 @@ http://127.0.0.1:8080
 * enable https support
 * UI will send audio data to ASR service when pause for 800ms, or have more than 48 tokens. The 2 seconds pause wait is for LLM not for asr
 
-- [ ] Make these changes
+- [x] Make these changes
 * In Audio hearing mode, remove the asr instruction tag like `language English<asr_text>` before sending to LLM
 * When new voice detected, pause the original voice both in UI and the ASR server. so that both UI and ASR server preparing for the new coming audio data. 
+
+- [x] under `/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts`
+Create a TTS service API, compatible with OpenAI TTS API format.
+* Use aiohttp to create an API service, reuse `audio_gen.py` file
+* Support real time audio streaming.
+* Create a evaluation solution so that I can use it to test the TTS service API
+* Implementation: `tts_api_server.py` (port 8090) + `eval_tts_api.py`
