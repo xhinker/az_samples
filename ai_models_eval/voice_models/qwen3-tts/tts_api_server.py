@@ -13,7 +13,8 @@ Usage (voice clone / Base model):
   python3 tts_api_server.py \
     --host 0.0.0.0 \
     --port 8090 \
-    --voice-clone-model-id models/tts_hf_models/Qwen/Qwen3-TTS-12Hz-1.7B-Base_main
+    --voice-clone-model-id models/tts_hf_models/Qwen/Qwen3-TTS-12Hz-1.7B-Base_main \
+    --device cuda:1
 
 Voice clone request (extra fields beyond OpenAI spec):
   {
@@ -240,6 +241,17 @@ async def speech_handler(request: web.Request) -> web.Response:
         reference_audio_bytes=reference_audio_bytes,
         reference_text=reference_text,
     )
+
+    if mode == "voice_clone":
+        logger.info(
+            "[TTS] mode=voice_clone  fmt=%s  ref_text=%r  input=%r",
+            response_format, reference_text, text,
+        )
+    else:
+        logger.info(
+            "[TTS] mode=custom_voice  fmt=%s  speaker=%s  input=%r",
+            response_format, qwen_speaker, text,
+        )
 
     sample_rate = service.sampling_rate_for_mode(mode)
     stop_event = threading.Event()
