@@ -94,3 +94,5 @@ Create a TTS service API, compatible with OpenAI TTS API format.
 * Support real time audio streaming.
 * Create a evaluation solution so that I can use it to test the TTS service API
 * Implementation: `tts_api_server.py` (port 8090) + `eval_tts_api.py`
+
+- [x] tts_api_server.py support auto english and chinese switch

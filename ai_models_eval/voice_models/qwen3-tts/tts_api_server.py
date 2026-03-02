@@ -41,6 +41,7 @@ import base64
 import io
 import logging
 import os
+import re
 import struct
 import threading
 from pathlib import Path
@@ -87,10 +88,27 @@ OPENAI_VOICE_MAP: dict[str, str] = {
 
 SUPPORTED_FORMATS = {"pcm", "wav", "mp3"}
 
-# Default reference voice (relative to this file)
+# Default reference voices (relative to this file)
 _SCRIPT_DIR = Path(__file__).parent
-DEFAULT_REF_AUDIO_PATH = _SCRIPT_DIR / "role_voices" / "female_ch_1.wav"
-DEFAULT_REF_TEXT_PATH = _SCRIPT_DIR / "role_voices" / "female_ch_1.txt"
+DEFAULT_REF_AUDIO_PATH_CH = _SCRIPT_DIR / "role_voices" / "female_ch_1.wav"
+DEFAULT_REF_TEXT_PATH_CH = _SCRIPT_DIR / "role_voices" / "female_ch_1.txt"
+DEFAULT_REF_AUDIO_PATH_EN = _SCRIPT_DIR / "role_voices" / "female_en_1.wav"
+DEFAULT_REF_TEXT_PATH_EN = _SCRIPT_DIR / "role_voices" / "female_en_1.txt"
+
+# Backward-compat aliases (used by _load_default_ref defaults and help text)
+DEFAULT_REF_AUDIO_PATH = DEFAULT_REF_AUDIO_PATH_CH
+DEFAULT_REF_TEXT_PATH = DEFAULT_REF_TEXT_PATH_CH
+
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def _detect_lang(text: str) -> str:
+    """Return 'zh' if text is primarily Chinese, else 'en'."""
+    stripped = text.replace(" ", "")
+    if not stripped:
+        return "en"
+    cjk = len(_CJK_RE.findall(stripped))
+    return "zh" if cjk / len(stripped) > 0.15 else "en"
 
 
 def _wav_header(sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16, data_size: int = 0xFFFFFFFF) -> bytes:
@@ -205,10 +223,20 @@ async def speech_handler(request: web.Request) -> web.Response:
             )
         mode = "voice_clone"
         qwen_speaker = DEFAULT_SPEAKER  # not used in voice_clone mode
-    elif request.app.get("default_ref_audio") and request.app.get("default_ref_text"):
-        # Fall back to server-side default reference voice
-        reference_audio_bytes = request.app["default_ref_audio"]
-        reference_text = request.app["default_ref_text"]
+    elif request.app.get("default_ref_audio_ch") or request.app.get("default_ref_audio_en"):
+        # Auto-select reference voice based on detected input text language
+        lang = _detect_lang(text)
+        if lang == "zh" and request.app.get("default_ref_audio_ch"):
+            reference_audio_bytes = request.app["default_ref_audio_ch"]
+            reference_text = request.app["default_ref_text_ch"] or ""
+        elif request.app.get("default_ref_audio_en"):
+            reference_audio_bytes = request.app["default_ref_audio_en"]
+            reference_text = request.app["default_ref_text_en"] or ""
+        else:
+            # Only Chinese reference available; use it as fallback
+            reference_audio_bytes = request.app["default_ref_audio_ch"]
+            reference_text = request.app["default_ref_text_ch"] or ""
+        logger.info("[TTS] auto-selected %s reference voice for input text", lang)
         mode = "voice_clone"
         qwen_speaker = DEFAULT_SPEAKER
     else:
@@ -441,9 +469,18 @@ def build_app(
         attn_implementation=attn_implementation,
     )
 
-    ref_audio_bytes, ref_text_str = _load_default_ref(default_ref_audio, default_ref_text)
-    app["default_ref_audio"] = ref_audio_bytes
-    app["default_ref_text"] = ref_text_str
+    # Chinese reference (user-overridable via --default-ref-audio / --default-ref-text)
+    ref_audio_ch, ref_text_ch = _load_default_ref(default_ref_audio, default_ref_text)
+    app["default_ref_audio_ch"] = ref_audio_ch
+    app["default_ref_text_ch"] = ref_text_ch
+
+    # English reference (always loaded from role_voices/female_en_1.*)
+    ref_audio_en, ref_text_en = _load_default_ref(
+        str(DEFAULT_REF_AUDIO_PATH_EN),
+        str(DEFAULT_REF_TEXT_PATH_EN),
+    )
+    app["default_ref_audio_en"] = ref_audio_en
+    app["default_ref_text_en"] = ref_text_en
 
     app.router.add_get("/health", health_handler)
     app.router.add_get("/v1/models", models_handler)
