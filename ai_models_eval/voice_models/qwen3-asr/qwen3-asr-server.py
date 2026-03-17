@@ -85,7 +85,7 @@ def load_model_sync() -> None:
     hf_model = AutoModel.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.bfloat16,
-        device_map="cuda:0",
+        device_map="cuda:1",
         attn_implementation="flash_attention_2",
     )
     hf_model.eval()
