@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Higgs Audio v3 TTS — Streaming Test</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="panel">
+      <h1>Higgs Audio v3 TTS</h1>
+      <p class="subhead">Real-time streaming · 100+ languages · Voice cloning · Emotion control</p>
+
+      <form id="stream-form">
+        <label for="text">Text</label>
+        <textarea id="text" name="text" rows="5" required placeholder="Enter text to speak..."></textarea>
+
+        <div class="grid">
+          <div>
+            <label for="voice">Voice</label>
+            <select id="voice" name="voice">
+              <option value="alloy">Alloy</option>
+              <option value="echo">Echo</option>
+              <option value="fable">Fable</option>
+              <option value="onyx">Onyx</option>
+              <option value="nova">Nova</option>
+              <option value="shimmer">Shimmer</option>
+            </select>
+          </div>
+          <div>
+            <label for="temperature">Temperature</label>
+            <input id="temperature" name="temperature" type="range" min="0.1" max="2.0" step="0.05" value="0.8">
+            <span id="temp-val">0.8</span>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div>
+            <label for="response_format">Format</label>
+            <select id="response_format" name="response_format">
+              <option value="wav">WAV (streaming)</option>
+              <option value="pcm">PCM (raw)</option>
+              <option value="mp3">MP3</option>
+            </select>
+          </div>
+          <div>
+            <label for="stream_mode">Streaming</label>
+            <select id="stream_mode">
+              <option value="chunked">Chunked (Web Audio)</option>
+              <option value="sse">SSE</option>
+            </select>
+          </div>
+        </div>
+
+        <details id="clone-section">
+          <summary>Voice Cloning (optional)</summary>
+          <div class="clone-inner">
+            <label for="reference_audio">Reference audio (.wav/.mp3)</label>
+            <input id="reference_audio" type="file" accept="audio/*">
+            <label for="reference_text">Reference transcript</label>
+            <textarea id="reference_text" rows="2" placeholder="Text spoken in reference audio"></textarea>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button id="start-btn" type="submit">▶ Generate</button>
+          <button id="stop-btn" type="button" disabled>⏹ Stop</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel logs">
+      <h2>Status</h2>
+      <pre id="status-log"></pre>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
