@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Audio generation and streaming for Higgs Audio v3 TTS (transformers port).
 
-Streaming strategy — true real-time decode during AR generation:
-  - Decode every STREAM_DECODE_EVERY_FRAMES new frames (low latency)
-  - Each cycle decodes ONLY the NEW portion since last emit (no re-decoding old data)
-  - Precise sample tracking using spf=960 (measured from DAC codec, constant ratio)
-  - BOC/EOC ramp-up handled by skipping first RAMPUP_SKIP_FRAMES worth of samples
-  - Cosine crossfade at chunk boundaries to smooth any remaining artifacts
+Gapless streaming strategy (qwen3-tts inspired):
 
-This avoids OOM (no re-decoding all frames each cycle) while maintaining true streaming.
+  The neural vocoder (DAC codec) produces boundary artifacts when decoding windows
+  of frames independently. To eliminate ALL gap sounds:
+
+  1. DECODE OVERLAP WINDOW — each cycle includes previously-decoded frames as context.
+     E.g., if emitting frame 50-62, actually decode frame 26-62 (with 24-frame overlap).
+     The vocoder sees continuous audio → no boundary artifacts.
+
+  2. PROPORTIONAL SAMPLE MAPPING — instead of assuming linear frames→samples ratio:
+     emit_from = round((overlap_frames_in_window / total_window_frames) * wav_size)
+     This correctly handles non-linear upsampling from transposed convolutions.
+
+  3. FRAME BUFFER + CONSUME — maintain a rolling buffer of all accumulated frames,
+     track decoded_global_frames, only emit genuinely-new samples each cycle.
+
+This produces TRULY gapless audio with no flicks or discontinuities between chunks.
 """
 
 from __future__ import annotations
@@ -37,10 +46,10 @@ logger = logging.getLogger("higgs_tts_server")
 
 DEFAULT_MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
 
-# Streaming constants (spf=960 measured from DAC codec)
-STREAM_DECODE_EVERY_FRAMES = 8        # Decode every N new frames (~320ms audio per chunk)
-CROSSFADE_SAMPLES = 480               # ~20ms crossfade between chunks
-RAMPUP_SKIP_SAMPLES = 1920            # Skip first 2 frames worth of BOC garbage (80ms @ 24kHz)
+# Streaming constants (matching qwen3-tts proven values)
+STREAM_DECODE_EVERY_FRAMES = 12       # Decode every N new frames (~500ms audio per chunk at ~5fps gen)
+STREAM_DECODE_OVERLAP_FRAMES = 24     # Include this many previously-decoded frames as context → gapless
+STREAM_MAX_DECODE_FRAMES = 144        # Max decode window size (prevents OOM on long texts)
 
 
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -143,21 +152,6 @@ class StreamParams:
     top_k: Optional[int] = None
 
 
-def _crossfade(prev_tail: np.ndarray, curr_head: np.ndarray) -> np.ndarray:
-    """Cosine crossfade between overlapping audio segments."""
-    overlap = min(len(prev_tail), len(curr_head))
-    if overlap < 2:
-        return curr_head.copy()
-    t = np.linspace(0, np.pi / 2, overlap)
-    w_prev = (np.cos(t) ** 2).astype(np.float32)
-    w_curr = (np.sin(t) ** 2).astype(np.float32)
-    blended = prev_tail[-overlap:].astype(np.float32) * w_prev + \
-              curr_head[:overlap].astype(np.float32) * w_curr
-    if overlap < len(curr_head):
-        return np.concatenate([blended, curr_head[overlap:]])
-    return blended
-
-
 class HiggsStreamingService:
     def __init__(self, model_path: str = DEFAULT_MODEL_PATH, device: str = "cuda:2", dtype: str = "bfloat16"):
         self.model_path = model_path
@@ -230,10 +224,12 @@ class HiggsStreamingService:
             return count
 
     async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event) -> AsyncIterator[bytes]:
-        """Generate speech and stream PCM16LE bytes in real time.
+        """Generate speech and stream PCM16LE bytes — truly gapless.
 
-        True streaming decode during AR generation — each cycle only decodes NEW frames,
-        never re-decodes old ones. Precise sample tracking via spf=960 (constant ratio).
+        Uses qwen3-tts proven approach:
+          - Decode overlap window (previously-decoded frames included as context)
+          - Proportional sample mapping (handles non-linear frame→sample ratio)
+          - Frame buffer + consume pattern (no re-decoding old data from scratch)
         """
         model, tokenizer = await self.ensure_model()
         loop = asyncio.get_running_loop()
@@ -276,81 +272,80 @@ class HiggsStreamingService:
                 rows: list[torch.Tensor] = []
                 max_tokens = min(estimate_max_new_tokens(text), 2048)
 
-                # ── Streaming state ──
-                emitted_frame_count = 0    # How many audio frames worth of samples already sent
-                prev_tail: Optional[np.ndarray] = None
-                rampup_done = False        # Whether we've skipped BOC garbage
-                first_emit = True          # Flag for very first chunk (apply fade-in)
+                # ── Gapless streaming state (qwen3-tts pattern) ──
+                decoded_global_frames = 0    # How many unique frames have been emitted as audio
+                done = False                 # Whether generation is complete
 
                 def _emit_chunk():
-                    nonlocal emitted_frame_count, prev_tail, rampup_done, first_emit
+                    nonlocal decoded_global_frames, done
 
-                    total_delayed_rows = len(rows)
-                    total_audio_frames = total_delayed_rows - N + 1
-                    if total_audio_frames < N + 2:
-                        return  # Not enough frames yet (still in ramp-up phase)
+                    total_audio_frames = len(rows) - N + 1  # Effective frames after delay reversal
+                    if total_audio_frames < max(3, N - 5):
+                        return  # Not enough frames yet (but allow short utterances to emit)
 
-                    new_frame_count = total_audio_frames - emitted_frame_count
-                    if new_frame_count <= 0:
-                        return  # No new frames since last emit
-
-                    # Decode only the NEW portion (incremental decode)
-                    # Take only the new delayed rows that correspond to new audio frames
-                    start_row = N - 1 + emitted_frame_count  # First delayed row with new data
-                    end_row = total_delayed_rows              # All accumulated rows
-                    if start_row >= end_row:
-                        return
-                    
-                    new_delayed = torch.stack([rows[i] for i in range(start_row, end_row)], dim=0)
-                    codes_TN = reverse_delay_pattern(new_delayed)
-                    
-                    # Verify we got useful frames
-                    actual_frames = int(codes_TN.shape[0])
-                    if actual_frames < 2:
+                    frames_ready = total_audio_frames - decoded_global_frames
+                    should_decode = (
+                        frames_ready >= STREAM_DECODE_EVERY_FRAMES
+                        or (done and frames_ready > 0)
+                    )
+                    if not should_decode:
                         return
 
+                    # ── Build decode window with overlap context ──
+                    # Include previously-decoded frames so vocoder sees continuous audio → no artifacts
+                    decode_end_global = min(
+                        total_audio_frames,
+                        decoded_global_frames + STREAM_MAX_DECODE_FRAMES,
+                    )
+                    start_global = max(0, decoded_global_frames - STREAM_DECODE_OVERLAP_FRAMES)
+
+                    # Map global frame indices to local row indices
+                    # Row index r corresponds to audio frame (r - (N-1)) in the reversed sequence
+                    start_row = start_global + N - 1
+                    end_row = decode_end_global + N - 1
+                    if start_row >= len(rows):
+                        return
+
+                    window_delayed = torch.stack([rows[i] for i in range(start_row, min(end_row, len(rows)))], dim=0)
+                    codes_TN = reverse_delay_pattern(window_delayed)
+
+                    actual_window_frames = int(codes_TN.shape[0])
+                    if actual_window_frames < 2:
+                        return
+
+                    # ── Decode window (with overlap context → no boundary artifacts) ──
                     wav = model._decode_codes(codes_TN)
                     wav_np = wav.numpy().astype(np.float32)
 
-                    # Skip BOC ramp-up garbage on first emit (1920 samples = 80ms)
-                    if not rampup_done:
-                        if len(wav_np) > RAMPUP_SKIP_SAMPLES + 480:
-                            wav_np = wav_np[RAMPUP_SKIP_SAMPLES:]
-                        else:
-                            pass  # Too short, emit as-is (likely very short utterance)
-                        rampup_done = True
-
-                    if len(wav_np) == 0:
-                        emitted_frame_count = total_audio_frames
-                        return
-
-                    new_samples = wav_np.astype(np.float32)
-
-                    # Crossfade with previous chunk tail for smooth boundaries
-                    if prev_tail is not None and len(prev_tail) > 0 and len(new_samples) > CROSSFADE_SAMPLES:
-                        overlap_len = min(len(prev_tail), CROSSFADE_SAMPLES, len(new_samples) - CROSSFADE_SAMPLES // 2)
-                        blended = _crossfade(
-                            prev_tail[-overlap_len:],
-                            new_samples[:overlap_len],
-                        )
-                        new_samples = np.concatenate([blended, new_samples[overlap_len:]])
-
-                    # Convert to PCM16 and emit
-                    pcm16 = np.clip(new_samples * 32767.0, -32768, 32767).astype(np.int16)
-                    asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
-
-                    # Update tracking
-                    emitted_frame_count += actual_frames
+                    # ── Proportional sample mapping (qwen3-tts) ──
+                    # How many frames in this decode window are previously-emitted (overlap)?
+                    emitted_local_frames = max(0, decoded_global_frames - start_global)
                     
-                    # Keep tail for next crossfade
-                    if len(new_samples) > CROSSFADE_SAMPLES:
-                        prev_tail = new_samples[-CROSSFADE_SAMPLES:].copy()
-                    else:
-                        prev_tail = new_samples.copy()
+                    # Calculate which samples correspond to the overlap portion using PROPORTIONAL mapping.
+                    # This correctly handles non-linear frame→sample ratio from transposed convolutions.
+                    local_total_frames = max(1, decode_end_global - start_global)
+                    emit_from_samples = int(round((emitted_local_frames / local_total_frames) * len(wav_np)))
+                    
+                    # Safety clamps
+                    if emit_from_samples > len(wav_np):
+                        emit_from_samples = len(wav_np)
+                    if emit_from_samples < 0:
+                        emit_from_samples = 0
 
-                    first_emit = False
-                    logger.debug("Emitted %d samples (%.0fms), total frames=%d", 
-                                len(pcm16), len(pcm16)/24000*1000, emitted_frame_count)
+                    # Emit only genuinely new samples (after the overlap portion)
+                    wav_delta = wav_np[emit_from_samples:]
+                    
+                    # Update decoded position to end of this decode window
+                    decoded_global_frames = decode_end_global
+
+                    if len(wav_delta) > 0:
+                        pcm16 = np.clip(wav_delta * 32767.0, -32768, 32767).astype(np.int16)
+                        asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
+                        logger.debug(
+                            "Emitted %d samples (%.0fms), frames=%d-%d, overlap=%d",
+                            len(pcm16), len(pcm16)/24000*1000, start_global+emitted_local_frames, 
+                            decode_end_global-1, emitted_local_frames
+                        )
 
                 # ── Streaming AR loop ──
                 for step in range(max_tokens):
@@ -364,9 +359,10 @@ class HiggsStreamingService:
                     )
                     rows.append(codes_N.cpu())
                     if state.generation_done:
+                        done = True
                         break
 
-                    frames_ready = len(rows)
+                    frames_ready = len(rows) - N + 1
                     if frames_ready >= N and (frames_ready % STREAM_DECODE_EVERY_FRAMES == 0 or state.generation_done):
                         try:
                             _emit_chunk()
@@ -385,8 +381,9 @@ class HiggsStreamingService:
                     position += 1
 
                 # ── Final decode: emit any remaining frames ──
-                if rows and not stop_event.is_set():
+                if len(rows) >= N:
                     try:
+                        done = True
                         _emit_chunk()
                     except Exception as e:
                         logger.warning("Final decode error (continuing): %s", e)

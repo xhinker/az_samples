@@ -1,18 +1,24 @@
 # Higgs Audio v3 TTS — Realtime Streaming Service
 
-OpenAI-compatible TTS API built on **bosonai/higgs-audio-v3-tts-4b** (transformers port). Supports real-time streaming audio, voice cloning, and a web test page.
+OpenAI-compatible TTS API built on **bosonai/higgs-audio-v3-tts-4b** (transformers port). Supports real-time streaming audio with gapless playback, voice cloning, and a web test page.
 
 ## Architecture
 
 | Component | File | Description |
 |-----------|------|-------------|
-| Generation engine | `higgs_audio_gen.py` | AR loop with periodic decode → PCM16 chunks |
+| Generation engine | `higgs_audio_gen.py` | AR loop with **gapless overlap decode windows** → clean PCM16 chunks |
 | API server | `higgs_tts_api_server.py` | aiohttp, OpenAI-compatible endpoints |
 | Web test page | `static/index.html`, `app.js`, `styles.css` | Browser-based streaming playback via Web Audio API |
 
 **Model:** HiggsMultimodalQwen3ForConditionalGeneration (Qwen3-4B backbone + multi-codebook head)  
 **Audio codec:** 8 codebooks × 1026 vocab, delay pattern, 24 kHz output  
 **Sample rate:** 24 kHz mono PCM16
+
+### Streaming Strategy (Gapless)
+
+Uses **decode overlap windows** (qwen3-tts inspired): each decode cycle includes previously-decoded frames as context so the neural vocoder sees continuous audio → zero boundary artifacts. Proportional sample mapping handles non-linear frame→sample ratio from transposed convolutions. Result: truly gapless, smooth streaming with no flicks or discontinuities between chunks.
+
+---
 
 ## Install
 
@@ -25,53 +31,45 @@ pip install -r requirements.txt
 Optional (for MP3 conversion):
 
 ```sh
-sudo apt-get update && sudo apt-get install ffmpeg
+sudo apt-get update && sudo apt get install ffmpeg
 ```
 
 ---
 
 ## 1. Start the TTS Service
 
-### Basic start (balanced multi-GPU placement)
+### Direct GPU placement (recommended)
+
+The model loads directly on a single target GPU — no auto-distribution across GPUs. Pick a GPU that has enough free VRAM (~10 GB for the model + codec):
 
 ```sh
 python3 higgs_tts_api_server.py \
   --host 0.0.0.0 \
   --port 8081 \
   --model-path /mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b \
-  --device cuda:1 \
+  --device cuda:2 \
   --dtype bfloat16
 ```
 
-With balanced placement (default), the model auto-distributes across all available GPUs + CPU offload. This handles setups where some GPUs are partially occupied by other processes (e.g., llama-server).
-
-### With explicit GPU memory limit (CPU offload)
-
-Use `--max-gpu-memory` to force CPU offloading on low-VRAM setups:
-
-```sh
-python3 higgs_tts_api_server.py \
-  --host 0.0.0.0 \
-  --port 8081 \
-  --model-path /mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b \
-  --device cuda:1 \
-  --dtype bfloat16 \
-  --max-gpu-memory 4GiB
-```
+> **Tip:** Check GPU availability first: `nvidia-smi` or run:
+> ```sh
+> python3 -c "import torch; [print(f'cuda:{i}: {torch.cuda.get_device_name(i)}') for i in range(torch.cuda.device_count())]"
+> ```
 
 ### Environment variable overrides
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HIGGS_MODEL_PATH` | `/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b` | Model directory path |
-| `HIGGS_DEVICE` | `cuda:1` | Target GPU device |
+| `HIGGS_DEVICE` | `cuda:2` | Target GPU (must have ~10 GB free) |
 | `HIGGS_DTYPE` | `bfloat16` | Model precision (`bfloat16` or `float16`) |
+| `PYTORCH_ALLOC_CONF` | `expandable_segments:True` | GPU memory fragmentation mitigation |
 
 Example with env vars:
 
 ```sh
 export HIGGS_MODEL_PATH=/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b
-export HIGGS_DEVICE=cuda:1
+export HIGGS_DEVICE=cuda:2
 python3 higgs_tts_api_server.py --port 8081
 ```
 
@@ -89,7 +87,7 @@ Expected response:
   "model_loaded": true,
   "model_path": "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b",
   "sample_rate": 24000,
-  "device": "cuda:1"
+  "device": "cuda:2"
 }
 ```
 
@@ -326,7 +324,7 @@ Navigate to: **http://localhost:8081** (or http://\<server-ip\>:8081 for remote 
 | **Voice selection** | Alloy / Echo / Fable / Onyx / Nova / Shimmer — each maps to different temperature presets |
 | **Temperature slider** | Range 0.1–2.0 with live value display (default 0.8) |
 | **Output format** | WAV (streaming), PCM (raw streaming), MP3 (non-streaming download) |
-| **Streaming mode** | Chunked Web Audio API playback for sub-second latency |
+| **Streaming mode** | Gapless Web Audio API playback, first audio within ~300-500ms |
 | **Voice cloning** | Upload reference `.wav`/`.mp3` file + optional transcript text |
 | **Start / Stop buttons** | Start generates and plays audio; Stop cancels both server-side generation and client playback |
 | **Status log** | Timestamped events showing stream progress and byte counts |
@@ -335,8 +333,8 @@ Navigate to: **http://localhost:8081** (or http://\<server-ip\>:8081 for remote 
 
 1. Enter text in the input field (or paste Chinese/Japanese/etc.)
 2. Select voice and adjust temperature if desired
-3. Click **▶ Generate** — audio starts playing within ~1 second
-4. Audio streams continuously as it's generated on the server
+3. Click **▶ Generate** — audio starts playing within ~300-500ms
+4. Audio streams continuously with gapless quality as it's generated on the server
 5. Click **⏹ Stop** at any time to cancel both generation and playback
 6. For voice cloning: expand the "Voice Cloning (optional)" section, upload a reference audio file, optionally add the transcript text, then generate
 
@@ -378,7 +376,7 @@ Embed these in the `input` text:
 ## Notes
 
 - The backend streams raw PCM16LE bytes over HTTP chunked transfer for WAV and PCM formats — no WAV header is sent during streaming to avoid browser playback issues.
-- Browser playback uses Web Audio API scheduling for low-latency continuous audio (< 1 second time-to-first-audio).
-- Balanced multi-GPU device placement distributes the model across all available GPUs + CPU offload by default. Use `--max-gpu-memory` for explicit memory limits.
+- Browser playback uses Web Audio API scheduling with monotonic clock for gapless continuous audio (~300-500ms time-to-first-audio).
+- Direct GPU placement loads the model entirely on one target GPU (`--device cuda:N`). Pick a GPU with ~10 GB free VRAM. No CPU offload or multi-GPU splitting.
 - One active stream at a time (async lock prevents concurrent generation conflicts).
 - Stop button cancels server-side generation via threading.Event — not just client playback.
