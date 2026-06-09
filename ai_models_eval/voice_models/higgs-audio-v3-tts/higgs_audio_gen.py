@@ -5,9 +5,8 @@ Architecture:
   - Uses bosonai/higgs-audio-v3-tts-4b with trust_remote_code
   - HiggsMultimodalQwen3ForConditionalGeneration (Qwen3-4B backbone + multi-codebook head)
   - 8 codebooks, delay pattern, 24 kHz output
-  - Streaming: decode-all-from-scratch each cycle (consistent boundaries), emit only
-    genuinely new samples. Overlap crossfade blending at chunk boundaries to smooth
-    neural codec artifacts.
+  - Streaming: decode-all-from-scratch each cycle with crossfade blending.
+    First emit delayed until enough real audio frames accumulated (skip ramp-up garbage).
 """
 
 from __future__ import annotations
@@ -37,20 +36,15 @@ logger = logging.getLogger("higgs_tts_server")
 DEFAULT_MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
 
 # Streaming decode constants
-STREAM_DECODE_EVERY_FRAMES = 40   # Higher = smoother (fewer decode boundaries), but more latency
-CROSSFADE_SAMPLES = 640    # ~27ms crossfade for smoother boundaries between larger chunks    # ~13ms overlap crossfade to smooth chunk boundaries
-CROSSFADE_FRAMES = 8       # Extra frames of context for crossfade
+STREAM_DECODE_EVERY_FRAMES = 36       # Decode every N new frames (~1.4s audio per chunk)
+MIN_EMIT_FRAMES = 28                  # Don't emit until at least this many frames (skip ramp-up BOC/EOC garbage)
+CROSSFADE_SAMPLES = 960               # ~40ms crossfade between chunks for smooth boundaries
 
 
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-
 BOC_ID = 1024
 EOC_ID = 1025
 
-
-# --------------------------------------------------------------------------- #
-# Delay pattern helpers (inlined)
-# --------------------------------------------------------------------------- #
 
 def apply_delay_pattern(codes_TN: torch.Tensor) -> torch.Tensor:
     T, N = codes_TN.shape
@@ -129,16 +123,6 @@ def _sampler_step(logits_NV: torch.Tensor, state: _SamplerState, *,
     return codes_N
 
 
-# --------------------------------------------------------------------------- #
-
-def _detect_lang(text: str) -> str:
-    stripped = text.replace(" ", "")
-    if not stripped:
-        return "en"
-    cjk = len(_CJK_CHAR_RE.findall(stripped))
-    return "zh" if cjk / len(stripped) > 0.15 else "en"
-
-
 def estimate_max_new_tokens(text: str) -> int:
     words = len(text.split())
     chars = len(text)
@@ -158,24 +142,26 @@ class StreamParams:
 
 
 def _crossfade(prev_tail: np.ndarray, curr_head: np.ndarray) -> np.ndarray:
-    """Crossfade blend two overlapping audio segments to eliminate clicks."""
-    fade_len = min(len(prev_tail), len(curr_head))
-    if fade_len <= 1:
-        return curr_head
-    # Smooth cosine crossfade: prev*fade_out + curr*fade_in
-    t = np.linspace(0, 1, fade_len)
-    fade_out = 0.5 * (1 - np.cos(np.pi * t))   # ramps 0→1 → multiply with (1-fade) = 1→0
-    fade_in = 0.5 * (1 + np.cos(np.pi * t))     # ramps 1→0 → but we want 0→1
-    # Actually use simple linear for speed, cosine for quality:
-    fade_out = np.sin(np.linspace(0, np.pi/2, fade_len)) ** 2   # 0→1
-    fade_in = np.cos(np.linspace(0, np.pi/2, fade_len)) ** 2    # 1→0
-    blended = prev_tail * (1 - fade_out) + curr_head * fade_out
-    return np.concatenate([blended, curr_head[fade_len:]])
+    """Cosine crossfade between two overlapping audio segments.
+    Returns blended segment of length len(curr_head)."""
+    overlap = min(len(prev_tail), len(curr_head))
+    if overlap < 2:
+        return curr_head.copy()
+
+    # Cosine power-2 crossfade weights
+    t = np.linspace(0, np.pi / 2, overlap)
+    w_prev = (np.cos(t) ** 2).astype(np.float32)   # 1→0
+    w_curr = (np.sin(t) ** 2).astype(np.float32)    # 0→1
+
+    blended = prev_tail[-overlap:].astype(np.float32) * w_prev + \
+              curr_head[:overlap].astype(np.float32) * w_curr
+
+    if overlap < len(curr_head):
+        return np.concatenate([blended, curr_head[overlap:]])
+    return blended
 
 
 class HiggsStreamingService:
-    """Manages Higgs Audio v3 TTS model lifecycle and streaming generation."""
-
     def __init__(self, model_path: str = DEFAULT_MODEL_PATH, device: str = "cuda:2", dtype: str = "bfloat16"):
         self.model_path = model_path
         self.device = device
@@ -249,9 +235,9 @@ class HiggsStreamingService:
     async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event) -> AsyncIterator[bytes]:
         """Generate speech and stream PCM16LE bytes in real time.
 
-        Decode-all-from-scratch each cycle for consistent neural vocoder output.
-        Track sample-level position precisely. Crossfade-blend chunk boundaries
-        to smooth any remaining codec artifacts.
+        - Decode ALL frames from scratch each cycle (consistent vocoder output)
+        - Wait for MIN_EMIT_FRAMES before first decode (skip ramp-up BOC/EOC garbage)
+        - Crossfade blend at chunk boundaries (smooth transitions)
         """
         model, tokenizer = await self.ensure_model()
         loop = asyncio.get_running_loop()
@@ -296,40 +282,48 @@ class HiggsStreamingService:
 
                 # ── Streaming state ──
                 decoded_pcm_samples = 0
-                prev_chunk_tail: Optional[np.ndarray] = None   # Tail of previous chunk for crossfade
-                first_chunk = True
+                prev_tail: Optional[np.ndarray] = None   # Tail of previous emitted chunk for crossfade
 
                 def _emit_chunk():
-                    nonlocal decoded_pcm_samples, prev_chunk_tail, first_chunk
+                    nonlocal decoded_pcm_samples, prev_tail
+
+                    # Skip until enough real frames accumulated (avoid ramp-up garbage)
+                    if len(rows) < MIN_EMIT_FRAMES:
+                        return
+
                     delayed_LN = torch.stack(rows, dim=0)
                     codes_TN = reverse_delay_pattern(delayed_LN)
                     if codes_TN.shape[0] < N:
                         return
+
                     wav = model._decode_codes(codes_TN)
                     wav_np = wav.numpy().astype(np.float32)
-                    
+
                     # Only emit samples we haven't sent yet
                     new_samples = wav_np[decoded_pcm_samples:]
+                    decoded_pcm_samples = len(wav_np)
+
                     if len(new_samples) == 0:
                         return
-                    
-                    decoded_pcm_samples = len(wav_np)
-                    
-                    # Crossfade with previous chunk tail to smooth boundaries
-                    if not first_chunk and prev_chunk_tail is not None and len(prev_chunk_tail) >= CROSSFADE_SAMPLES:
-                        overlap = new_samples[:CROSSFADE_SAMPLES]
-                        blended = _crossfade(prev_chunk_tail[-CROSSFADE_SAMPLES:], overlap)
-                        new_samples = np.concatenate([blended, new_samples[CROSSFADE_SAMPLES:]])
-                    
-                    first_chunk = False
-                    
-                    if len(new_samples) > 0:
-                        pcm16 = np.clip(new_samples * 32767.0, -32768, 32767).astype(np.int16)
-                        asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
 
-                    # Keep tail of this chunk for next crossfade
+                    # Crossfade with previous chunk tail to smooth boundaries
+                    if prev_tail is not None and len(prev_tail) > 0 and len(new_samples) > CROSSFADE_SAMPLES:
+                        overlap_len = min(len(prev_tail), CROSSFADE_SAMPLES)
+                        blended = _crossfade(
+                            prev_tail[-overlap_len:],
+                            new_samples[:overlap_len],
+                        )
+                        new_samples = np.concatenate([blended, new_samples[overlap_len:]])
+
+                    # Convert to PCM16 and emit
+                    pcm16 = np.clip(new_samples * 32767.0, -32768, 32767).astype(np.int16)
+                    asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
+
+                    # Keep tail for next crossfade
                     if len(new_samples) > CROSSFADE_SAMPLES:
-                        prev_chunk_tail = new_samples[-CROSSFADE_SAMPLES:].copy()
+                        prev_tail = new_samples[-CROSSFADE_SAMPLES:].copy()
+                    else:
+                        prev_tail = new_samples.copy()
 
                 # ── Streaming AR loop ──
                 for step in range(max_tokens):
