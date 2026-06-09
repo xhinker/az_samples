@@ -2,7 +2,7 @@
 """Audio generation and streaming for Higgs Audio v3 TTS (transformers port).
 
 Architecture:
-  - Uses multimodalart/higgs-audio-v3-tts-4b-transformers port (trust_remote_code)
+  - Uses bosonai/higgs-audio-v3-tts-4b with trust_remote_code
   - HiggsMultimodalQwen3ForConditionalGeneration (Qwen3-4B backbone + multi-codebook head)
   - 8 codebooks, delay pattern, 24 kHz output
   - Streaming: runs the AR loop, periodically decodes partial code rows to audio,
@@ -10,6 +10,9 @@ Architecture:
 """
 
 from __future__ import annotations
+
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import asyncio
 import io
@@ -26,7 +29,6 @@ import transformers.modeling_utils as modeling_utils
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Monkey-patch to skip the caching allocator warmup that can cause OOM
-# when GPU memory is limited. Safe to remove when GPU has enough free memory.
 _original_warmup = modeling_utils.caching_allocator_warmup
 modeling_utils.caching_allocator_warmup = lambda *a, **kw: None
 
@@ -173,27 +175,22 @@ class HiggsStreamingService:
     def __init__(
         self,
         model_path: str = DEFAULT_MODEL_PATH,
-        device: str = "cuda:1",
+        device: str = "cuda:2",
         dtype: str = "bfloat16",
-        max_gpu_memory: Optional[str] = None,
     ):
         """Initialize the service.
 
         Args:
             model_path: Path to higgs-audio-v3-tts-4b model directory.
-            device: Target GPU (e.g. "cuda:1"). Used as preferred device for
-                balanced placement across all available GPUs + CPU offload.
+            device: Target GPU (e.g. "cuda:2"). Model is placed DIRECTLY on this
+                GPU with no scattering to other GPUs. All inference (including the
+                audio codec decoder) runs entirely on the specified GPU.
             dtype: "bfloat16" or "float16".
-            max_gpu_memory: If set (e.g. "4.5GiB"), use that limit per GPU with
-                CPU offload. If None (default), use device_map="balanced" to
-                auto-distribute across all GPUs, falling back to the target
-                GPU-only placement if balanced fails.
         """
         self.model_path = model_path
         self.device = device
         self.dtype_str = dtype
         self.dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float16
-        self.max_gpu_memory = max_gpu_memory
         self._model = None
         self._tokenizer = None
         self._lock = asyncio.Lock()
@@ -239,90 +236,45 @@ class HiggsStreamingService:
             self._model = model
             self._tokenizer = tokenizer
             logger.info(
-                "Loaded Higgs Audio v3 TTS model from %s (dtype=%s)",
-                self.model_path, self.dtype_str,
+                "Loaded Higgs Audio v3 TTS on %s (dtype=%s)",
+                self.device, self.dtype_str,
             )
+            # Log GPU memory after load
+            try:
+                dev_idx = int(self.device.split(":")[-1])
+                free_gb = torch.cuda.mem_get_info(dev_idx)[0] / 1e9
+                total_gb = torch.cuda.get_device_properties(dev_idx).total_memory / 1e9
+                logger.info(
+                    "GPU %s memory: %.1f/%.0f GB used",
+                    self.device, total_gb - free_gb, total_gb,
+                )
+            except Exception:
+                pass
             return model, tokenizer
 
-    def _build_max_memory(self) -> dict:
-        """Build a max_memory dict for balanced device placement.
-
-        Prioritizes the target GPU, then distributes remaining capacity to
-        other GPUs and CPU offload.
-        """
-        n_gpus = torch.cuda.device_count()
-        if not n_gpus:
-            raise RuntimeError("No CUDA devices available")
-
-        target_id = int(self.device.split(":")[-1]) if ":" in self.device else 0
-        # Clamp to actual GPU count
-        target_id = min(target_id, n_gpus - 1)
-
-        mem_map = {}
-        for i in range(n_gpus):
-            total_gb = torch.cuda.get_device_properties(i).total_memory / 1e9
-            if i == target_id:
-                # Reserve most of the target GPU but leave headroom
-                mem_map[i] = f"{min(total_gb - 2, total_gb * 0.85):.0f}GiB"
-            elif i != target_id:
-                # Use available GPUs for overflow
-                mem_map[i] = f"{max(total_gb - 4, total_gb * 0.3):.0f}GiB"
-
-        mem_map["cpu"] = "60GiB"
-        return mem_map
-
     def _load_model(self):
-        import os
+        """Load model directly on the specified GPU — no device_map scattering.
+
+        This keeps ALL model layers AND the audio codec decoder on one GPU,
+        avoiding OOM errors that occur when balanced placement scatters layers
+        onto GPUs already occupied by other processes (e.g., llama-server).
+        """
         tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
 
-        if self.max_gpu_memory:
-            # Explicit memory limit — use auto device_map with CPU offload
-            device_id = int(self.device.split(":")[-1]) if ":" in self.device else 0
-            max_memory = {device_id: self.max_gpu_memory, "cpu": "60GiB"}
-            logger.info("Loading model with max_gpu_memory=%s on GPU %d",
-                        self.max_gpu_memory, device_id)
-            model = AutoModelForCausalLM.from_pretrained(
-                self.model_path,
-                trust_remote_code=True,
-                dtype=self.dtype,
-                device_map="auto",
-                max_memory=max_memory,
-                offload_folder="/tmp/higgs_offload",
-            ).eval()
-        else:
-            # Balanced placement across all GPUs (handles multi-GPU setups where
-            # some GPUs are partially occupied by other processes).
-            max_memory = self._build_max_memory()
-            logger.info("Loading model with balanced placement: max_memory=%s",
-                        {k: v for k, v in max_memory.items() if isinstance(k, int)})
+        logger.info("Loading model directly on %s ...", self.device)
+        model = AutoModelForCausalLM.from_pretrained(
+            self.model_path,
+            trust_remote_code=True,
+            dtype=self.dtype,
+            device_map=self.device,   # DIRECT placement — no "auto" or "balanced"
+        ).eval()
 
-            try:
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_path,
-                    trust_remote_code=True,
-                    dtype=self.dtype,
-                    device_map="balanced",
-                    max_memory=max_memory,
-                    offload_folder="/tmp/higgs_offload",
-                ).eval()
-                logger.info("Balanced placement succeeded")
-            except Exception as balanced_err:
-                logger.warning("Balanced placement failed (%s), falling back to direct placement",
-                              balanced_err)
-                # Fallback: try direct placement on target GPU
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_path,
-                    trust_remote_code=True,
-                    dtype=self.dtype,
-                    device_map=self.device,
-                ).eval()
-
-        # Pre-load the codec
+        # Pre-load the codec (keeps it on the same GPU as the model)
         try:
             codec = model.get_audio_codec()
-            logger.info("Audio codec pre-loaded: %s", type(codec).__name__)
+            logger.info("Audio codec loaded on %s: %s", codec.device, type(codec).__name__)
         except Exception as e:
-            logger.warning("Audio codec warmup had issue (will retry on first use): %s", e)
+            logger.warning("Audio codec warmup issue (will retry on first use): %s", e)
 
         return model, tokenizer
 
@@ -335,6 +287,9 @@ class HiggsStreamingService:
 
         Uses the Higgs AR loop: prefill → autoregressive code generation →
         periodic decode → yield PCM16 chunks.
+
+        IMPORTANT: All tensors stay on model.device throughout generation to avoid
+        cross-GPU transfer overhead that causes audio gaps.
         """
         model, tokenizer = await self.ensure_model()
         loop = asyncio.get_running_loop()
@@ -343,6 +298,7 @@ class HiggsStreamingService:
         def _run_generation():
             try:
                 N = model.num_codebooks
+                device = model.device
                 text = params.text.strip()
 
                 # ── Reference audio encoding ──
@@ -356,7 +312,7 @@ class HiggsStreamingService:
                                 wf.readframes(n_frames), dtype=np.int16
                             )
                             audio_float = audio_data.astype(np.float32) / 32768.0
-                    ref_tensor = torch.from_numpy(audio_float)
+                    ref_tensor = torch.from_numpy(audio_float).to(device)
                     codes_TN = model._encode_reference(ref_tensor, sr)
                     delayed_ref = apply_delay_pattern(codes_TN.cpu())
 
@@ -420,7 +376,7 @@ class HiggsStreamingService:
 
                     # Forward step for next token
                     step_embed = model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
-                    cache_pos = torch.tensor([position], device=model.device)
+                    cache_pos = torch.tensor([position], device=device)
                     out = model.model(
                         inputs_embeds=step_embed.to(inputs_embeds.dtype),
                         past_key_values=past,

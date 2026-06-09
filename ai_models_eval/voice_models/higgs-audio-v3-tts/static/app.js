@@ -7,13 +7,14 @@ const tempVal = document.getElementById('temp-val');
 
 let audioContext = null;
 let gainNode = null;
-let nextPlaybackTime = 0;
+// Monotonic scheduling clock — only advances by buffer durations, never drifts.
+let scheduleClock = 0;
 let activeSources = new Set();
 let controller = null;
 let pcmStash = new Uint8Array(0);
 
-const STARTUP_BUFFER_SEC = 1.0;
-const MIN_SOURCE_SAMPLES = 4096;
+const STARTUP_BUFFER_SEC = 0.3;   // Shorter initial buffer for lower latency
+const MIN_SOURCE_SAMPLES = 2048;  // Smaller flush threshold = more frequent scheduling
 
 function log(message) {
   const line = `[${new Date().toLocaleTimeString()}] ${message}\n`;
@@ -29,15 +30,28 @@ function ensureAudioContext(sampleRate) {
   if (!audioContext) {
     audioContext = new AudioContext({ sampleRate });
     gainNode = audioContext.createGain();
+    gainNode.gain.value = 1.0;
     gainNode.connect(audioContext.destination);
-    nextPlaybackTime = audioContext.currentTime + STARTUP_BUFFER_SEC;
+    // Start the monotonic clock from a point slightly in the future so the first
+    // buffer has time to arrive and fill before playback begins.
+    scheduleClock = audioContext.currentTime + STARTUP_BUFFER_SEC;
   }
   if (audioContext.state === 'suspended') {
-    return audioContext.resume();
+    return audioContext.resume().then(() => {
+      // After resume, adjust scheduleClock to current time + small offset
+      // to avoid scheduling in the past.
+      scheduleClock = Math.max(scheduleClock, audioContext.currentTime + 0.01);
+    });
   }
   return Promise.resolve();
 }
 
+/**
+ * Schedule a PCM chunk onto the Web Audio timeline.
+ * Uses a monotonic scheduleClock that only advances by each buffer's duration —
+ * never looks at currentTime — so late-arriving chunks catch up seamlessly
+ * without creating gaps.
+ */
 function enqueuePcmChunk(pcmBytes, sampleRate) {
   if (!pcmBytes || pcmBytes.byteLength === 0) return;
   const int16 = new Int16Array(
@@ -45,19 +59,25 @@ function enqueuePcmChunk(pcmBytes, sampleRate) {
     Math.floor(pcmBytes.byteLength / 2)
   );
   if (int16.length === 0) return;
+
+  // Convert int16 -> float32 in-place for efficiency
   const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i += 1) {
+  for (let i = 0; i < int16.length; i++) {
     float32[i] = int16[i] / 32768.0;
   }
+
   const buffer = audioContext.createBuffer(1, float32.length, sampleRate);
   buffer.getChannelData(0).set(float32);
 
   const source = audioContext.createBufferSource();
   source.buffer = buffer;
   source.connect(gainNode);
-  const startAt = Math.max(nextPlaybackTime, audioContext.currentTime + 0.02);
+
+  // Schedule at the monotonic clock position — no drift, no gaps.
+  const startAt = scheduleClock;
   source.start(startAt);
-  nextPlaybackTime = startAt + buffer.duration;
+  scheduleClock = startAt + buffer.duration;
+
   activeSources.add(source);
   source.onended = () => activeSources.delete(source);
 }
@@ -90,7 +110,8 @@ async function stopPlayback({ silent = false } = {}) {
   activeSources.clear();
   pcmStash = new Uint8Array(0);
   if (audioContext) {
-    nextPlaybackTime = audioContext.currentTime;
+    // Reset scheduleClock so next playback starts fresh without scheduling in the past
+    scheduleClock = audioContext.currentTime + STARTUP_BUFFER_SEC;
   }
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -117,7 +138,6 @@ async function streamAudioChunked(body) {
 
   const sampleRate = Number(response.headers.get('x-sample-rate')) || 24000;
   await ensureAudioContext(sampleRate);
-  nextPlaybackTime = audioContext.currentTime + STARTUP_BUFFER_SEC;
   pcmStash = new Uint8Array(0);
   log('Streaming started...');
 
@@ -145,8 +165,16 @@ async function streamAudioChunked(body) {
     totalBytes += pcm.byteLength;
     pushPcmBytes(pcm, sampleRate, false);
   }
+  // Flush remaining bytes
   pushPcmBytes(carry, sampleRate, true);
-  log(`Done. Total: ${(totalBytes / 1024).toFixed(1)} KB`);
+  
+  // Wait for all scheduled audio to finish playing before logging "Done"
+  const remainingSec = scheduleClock - audioContext.currentTime;
+  if (remainingSec > 0.05) {
+    log(`Streaming done (${(totalBytes / 1024).toFixed(1)} KB), ${remainingSec.toFixed(1)}s of audio still playing...`);
+  } else {
+    log(`Done. Total: ${(totalBytes / 1024).toFixed(1)} KB`);
+  }
 }
 
 stopBtn.addEventListener('click', async () => {
@@ -161,7 +189,6 @@ form.addEventListener('submit', async (event) => {
   if (!text) { log('Text is required.'); return; }
 
   const format = document.getElementById('response_format').value;
-  const streamMode = document.getElementById('stream_mode').value;
   const voice = document.getElementById('voice').value;
   const temperature = parseFloat(document.getElementById('temperature').value);
 
@@ -208,7 +235,7 @@ form.addEventListener('submit', async (event) => {
       URL.revokeObjectURL(url);
       log('MP3 downloaded.');
     } else {
-      // WAV/PCM streaming
+      // WAV/PCM streaming with gap-free playback
       await streamAudioChunked(body);
     }
   } catch (err) {
