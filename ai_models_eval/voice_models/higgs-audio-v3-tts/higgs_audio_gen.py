@@ -5,8 +5,14 @@ Architecture:
   - Uses bosonai/higgs-audio-v3-tts-4b with trust_remote_code
   - HiggsMultimodalQwen3ForConditionalGeneration (Qwen3-4B backbone + multi-codebook head)
   - 8 codebooks, delay pattern, 24 kHz output
-  - Streaming: decode-all-from-scratch each cycle with crossfade blending.
-    First emit delayed until enough real audio frames accumulated (skip ramp-up garbage).
+
+Streaming strategy (qwen3-tts inspired, decode-all-from-scratch):
+  Decode ALL accumulated frames from scratch each cycle — identical input produces
+  identical output so decoded_pcm_samples tracking stays perfectly consistent.
+
+  Ramp-up BOC/EOC handling:
+  The first ~2 audio frames contain partial BOC tokens that produce near-silence.
+  Skip exactly 2×960=1920 samples (~80ms) to remove artifacts without cutting speech.
 """
 
 from __future__ import annotations
@@ -35,10 +41,9 @@ logger = logging.getLogger("higgs_tts_server")
 
 DEFAULT_MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
 
-# Streaming decode constants
-STREAM_DECODE_EVERY_FRAMES = 36       # Decode every N new frames (~1.4s audio per chunk)
-MIN_EMIT_FRAMES = 28                  # Don't emit until at least this many frames (skip ramp-up BOC/EOC garbage)
-CROSSFADE_SAMPLES = 960               # ~40ms crossfade between chunks for smooth boundaries
+STREAM_DECODE_EVERY_FRAMES = 12       # Decode every N frames for low latency
+CROSSFADE_SAMPLES = 640               # ~27ms crossfade between chunks
+RAMPUP_SKIP_FRAMES = 2                # Skip first 2 frames worth of BOC garbage (1920 samples = 80ms)
 
 
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -142,20 +147,15 @@ class StreamParams:
 
 
 def _crossfade(prev_tail: np.ndarray, curr_head: np.ndarray) -> np.ndarray:
-    """Cosine crossfade between two overlapping audio segments.
-    Returns blended segment of length len(curr_head)."""
+    """Cosine crossfade between overlapping audio segments."""
     overlap = min(len(prev_tail), len(curr_head))
     if overlap < 2:
         return curr_head.copy()
-
-    # Cosine power-2 crossfade weights
     t = np.linspace(0, np.pi / 2, overlap)
-    w_prev = (np.cos(t) ** 2).astype(np.float32)   # 1→0
-    w_curr = (np.sin(t) ** 2).astype(np.float32)    # 0→1
-
+    w_prev = (np.cos(t) ** 2).astype(np.float32)
+    w_curr = (np.sin(t) ** 2).astype(np.float32)
     blended = prev_tail[-overlap:].astype(np.float32) * w_prev + \
               curr_head[:overlap].astype(np.float32) * w_curr
-
     if overlap < len(curr_head):
         return np.concatenate([blended, curr_head[overlap:]])
     return blended
@@ -235,9 +235,9 @@ class HiggsStreamingService:
     async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event) -> AsyncIterator[bytes]:
         """Generate speech and stream PCM16LE bytes in real time.
 
-        - Decode ALL frames from scratch each cycle (consistent vocoder output)
-        - Wait for MIN_EMIT_FRAMES before first decode (skip ramp-up BOC/EOC garbage)
-        - Crossfade blend at chunk boundaries (smooth transitions)
+        Decode ALL frames from scratch each cycle for consistent output.
+        Skip only RAMPUP_SKIP_FRAMES=2 worth of samples (~1920 = 80ms) to remove
+        BOC/EOC artifacts at the very start without cutting into valid speech.
         """
         model, tokenizer = await self.ensure_model()
         loop = asyncio.get_running_loop()
@@ -282,29 +282,38 @@ class HiggsStreamingService:
 
                 # ── Streaming state ──
                 decoded_pcm_samples = 0
-                prev_tail: Optional[np.ndarray] = None   # Tail of previous emitted chunk for crossfade
+                prev_tail: Optional[np.ndarray] = None
+                rampup_skipped = False
 
                 def _emit_chunk():
-                    nonlocal decoded_pcm_samples, prev_tail
+                    nonlocal decoded_pcm_samples, prev_tail, rampup_skipped
 
-                    # Skip until enough real frames accumulated (avoid ramp-up garbage)
-                    if len(rows) < MIN_EMIT_FRAMES:
+                    if len(rows) < N + 2:
                         return
 
                     delayed_LN = torch.stack(rows, dim=0)
                     codes_TN = reverse_delay_pattern(delayed_LN)
-                    if codes_TN.shape[0] < N:
+                    if codes_TN.shape[0] < 2:
                         return
 
                     wav = model._decode_codes(codes_TN)
                     wav_np = wav.numpy().astype(np.float32)
 
-                    # Only emit samples we haven't sent yet
-                    new_samples = wav_np[decoded_pcm_samples:]
-                    decoded_pcm_samples = len(wav_np)
+                    # Skip BOC ramp-up artifacts on first decode only (1920 samples = 80ms)
+                    skip_samples = RAMPUP_SKIP_FRAMES * 960  # spf is always exactly 960 for this codec
+                    if not rampup_skipped and len(wav_np) > skip_samples + 480:
+                        decoded_pcm_samples = skip_samples
+                        rampup_skipped = True
+                        logger.info("Skipped %d BOC ramp-up samples (%.1fms)", 
+                                   skip_samples, skip_samples / 24000 * 1000)
 
+                    # Emit only genuinely new samples
+                    new_samples = wav_np[decoded_pcm_samples:]
                     if len(new_samples) == 0:
+                        decoded_pcm_samples = len(wav_np)
                         return
+
+                    decoded_pcm_samples = len(wav_np)
 
                     # Crossfade with previous chunk tail to smooth boundaries
                     if prev_tail is not None and len(prev_tail) > 0 and len(new_samples) > CROSSFADE_SAMPLES:
@@ -315,7 +324,6 @@ class HiggsStreamingService:
                         )
                         new_samples = np.concatenate([blended, new_samples[overlap_len:]])
 
-                    # Convert to PCM16 and emit
                     pcm16 = np.clip(new_samples * 32767.0, -32768, 32767).astype(np.int16)
                     asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
 
@@ -357,7 +365,7 @@ class HiggsStreamingService:
                     hidden_last = out.last_hidden_state[:, -1, :]
                     position += 1
 
-                # ── Final decode: emit remaining frames ──
+                # ── Final decode ──
                 if rows and not stop_event.is_set():
                     try:
                         _emit_chunk()
