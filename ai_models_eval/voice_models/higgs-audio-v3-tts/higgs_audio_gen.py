@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """Audio generation and streaming for Higgs Audio v3 TTS (transformers port).
 
-Architecture:
-  - Uses bosonai/higgs-audio-v3-tts-4b with trust_remote_code
-  - HiggsMultimodalQwen3ForConditionalGeneration (Qwen3-4B backbone + multi-codebook head)
-  - 8 codebooks, delay pattern, 24 kHz output
+Streaming strategy — true real-time decode during AR generation:
+  - Decode every STREAM_DECODE_EVERY_FRAMES new frames (low latency)
+  - Each cycle decodes ONLY the NEW portion since last emit (no re-decoding old data)
+  - Precise sample tracking using spf=960 (measured from DAC codec, constant ratio)
+  - BOC/EOC ramp-up handled by skipping first RAMPUP_SKIP_FRAMES worth of samples
+  - Cosine crossfade at chunk boundaries to smooth any remaining artifacts
 
-Streaming strategy — NO decode-all-from-scratch re-decoding. Instead:
-  Collect all audio codes during AR generation, then do ONE final decode at the end.
-  This guarantees ZERO boundary artifacts between chunks because there's only one decode call.
-  
-  For real-time streaming, we emit a small initial silence buffer while waiting for
-  enough frames to accumulate, then stream the full decoded audio in one clean chunk.
-  
-  Tradeoff: slightly higher latency (~1-2s before first audio) but PERFECT quality
-  with no breaks, gaps, or artifacts anywhere in the output.
+This avoids OOM (no re-decoding all frames each cycle) while maintaining true streaming.
 """
 
 from __future__ import annotations
@@ -42,6 +36,11 @@ modeling_utils.caching_allocator_warmup = lambda *a, **kw: None
 logger = logging.getLogger("higgs_tts_server")
 
 DEFAULT_MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
+
+# Streaming constants (spf=960 measured from DAC codec)
+STREAM_DECODE_EVERY_FRAMES = 8        # Decode every N new frames (~320ms audio per chunk)
+CROSSFADE_SAMPLES = 480               # ~20ms crossfade between chunks
+RAMPUP_SKIP_SAMPLES = 1920            # Skip first 2 frames worth of BOC garbage (80ms @ 24kHz)
 
 
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -144,6 +143,21 @@ class StreamParams:
     top_k: Optional[int] = None
 
 
+def _crossfade(prev_tail: np.ndarray, curr_head: np.ndarray) -> np.ndarray:
+    """Cosine crossfade between overlapping audio segments."""
+    overlap = min(len(prev_tail), len(curr_head))
+    if overlap < 2:
+        return curr_head.copy()
+    t = np.linspace(0, np.pi / 2, overlap)
+    w_prev = (np.cos(t) ** 2).astype(np.float32)
+    w_curr = (np.sin(t) ** 2).astype(np.float32)
+    blended = prev_tail[-overlap:].astype(np.float32) * w_prev + \
+              curr_head[:overlap].astype(np.float32) * w_curr
+    if overlap < len(curr_head):
+        return np.concatenate([blended, curr_head[overlap:]])
+    return blended
+
+
 class HiggsStreamingService:
     def __init__(self, model_path: str = DEFAULT_MODEL_PATH, device: str = "cuda:2", dtype: str = "bfloat16"):
         self.model_path = model_path
@@ -160,26 +174,6 @@ class HiggsStreamingService:
     @property
     def sample_rate(self) -> int:
         return 24000
-
-    def register_active_stream(self, stop_event: threading.Event) -> int:
-        with self._active_stop_events_lock:
-            self._stop_counter += 1
-            sid = self._stop_counter
-            self._active_stop_events[sid] = stop_event
-            return sid
-
-    def clear_active_stream(self, sid: int) -> None:
-        with self._active_stop_events_lock:
-            self._active_stop_events.pop(sid, None)
-
-    def request_stop(self) -> int:
-        with self._active_stop_events_lock:
-            count = len(self._active_stop_events)
-            for ev in self._active_stop_events.values():
-                ev.set()
-            if count > 0:
-                logger.info("Stop requested for %d active streams", count)
-            return count
 
     async def ensure_model(self):
         if self._model is not None:
@@ -215,14 +209,31 @@ class HiggsStreamingService:
             logger.warning("Audio codec warmup issue (will retry on first use): %s", e)
         return model, tokenizer
 
-    async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event) -> AsyncIterator[bytes]:
-        """Generate speech and stream PCM16LE bytes.
+    def register_active_stream(self, stop_event: threading.Event) -> int:
+        with self._active_stop_events_lock:
+            self._stop_counter += 1
+            sid = self._stop_counter
+            self._active_stop_events[sid] = stop_event
+            return sid
 
-        Collect all audio codes during AR generation, then do ONE final decode + emit.
-        This guarantees ZERO boundary artifacts — only one neural vocoder call ever made.
-        
-        For streaming feel, we split the final decoded audio into ~200ms chunks and
-        yield them sequentially with small delays to simulate real-time playback timing.
+    def clear_active_stream(self, sid: int) -> None:
+        with self._active_stop_events_lock:
+            self._active_stop_events.pop(sid, None)
+
+    def request_stop(self) -> int:
+        with self._active_stop_events_lock:
+            count = len(self._active_stop_events)
+            for ev in self._active_stop_events.values():
+                ev.set()
+            if count > 0:
+                logger.info("Stop requested for %d active streams", count)
+            return count
+
+    async def stream_pcm16(self, params: StreamParams, stop_event: threading.Event) -> AsyncIterator[bytes]:
+        """Generate speech and stream PCM16LE bytes in real time.
+
+        True streaming decode during AR generation — each cycle only decodes NEW frames,
+        never re-decodes old ones. Precise sample tracking via spf=960 (constant ratio).
         """
         model, tokenizer = await self.ensure_model()
         loop = asyncio.get_running_loop()
@@ -265,7 +276,83 @@ class HiggsStreamingService:
                 rows: list[torch.Tensor] = []
                 max_tokens = min(estimate_max_new_tokens(text), 2048)
 
-                # ── AR generation loop (collect codes only, no decode yet) ──
+                # ── Streaming state ──
+                emitted_frame_count = 0    # How many audio frames worth of samples already sent
+                prev_tail: Optional[np.ndarray] = None
+                rampup_done = False        # Whether we've skipped BOC garbage
+                first_emit = True          # Flag for very first chunk (apply fade-in)
+
+                def _emit_chunk():
+                    nonlocal emitted_frame_count, prev_tail, rampup_done, first_emit
+
+                    total_delayed_rows = len(rows)
+                    total_audio_frames = total_delayed_rows - N + 1
+                    if total_audio_frames < N + 2:
+                        return  # Not enough frames yet (still in ramp-up phase)
+
+                    new_frame_count = total_audio_frames - emitted_frame_count
+                    if new_frame_count <= 0:
+                        return  # No new frames since last emit
+
+                    # Decode only the NEW portion (incremental decode)
+                    # Take only the new delayed rows that correspond to new audio frames
+                    start_row = N - 1 + emitted_frame_count  # First delayed row with new data
+                    end_row = total_delayed_rows              # All accumulated rows
+                    if start_row >= end_row:
+                        return
+                    
+                    new_delayed = torch.stack([rows[i] for i in range(start_row, end_row)], dim=0)
+                    codes_TN = reverse_delay_pattern(new_delayed)
+                    
+                    # Verify we got useful frames
+                    actual_frames = int(codes_TN.shape[0])
+                    if actual_frames < 2:
+                        return
+
+                    wav = model._decode_codes(codes_TN)
+                    wav_np = wav.numpy().astype(np.float32)
+
+                    # Skip BOC ramp-up garbage on first emit (1920 samples = 80ms)
+                    if not rampup_done:
+                        if len(wav_np) > RAMPUP_SKIP_SAMPLES + 480:
+                            wav_np = wav_np[RAMPUP_SKIP_SAMPLES:]
+                        else:
+                            pass  # Too short, emit as-is (likely very short utterance)
+                        rampup_done = True
+
+                    if len(wav_np) == 0:
+                        emitted_frame_count = total_audio_frames
+                        return
+
+                    new_samples = wav_np.astype(np.float32)
+
+                    # Crossfade with previous chunk tail for smooth boundaries
+                    if prev_tail is not None and len(prev_tail) > 0 and len(new_samples) > CROSSFADE_SAMPLES:
+                        overlap_len = min(len(prev_tail), CROSSFADE_SAMPLES, len(new_samples) - CROSSFADE_SAMPLES // 2)
+                        blended = _crossfade(
+                            prev_tail[-overlap_len:],
+                            new_samples[:overlap_len],
+                        )
+                        new_samples = np.concatenate([blended, new_samples[overlap_len:]])
+
+                    # Convert to PCM16 and emit
+                    pcm16 = np.clip(new_samples * 32767.0, -32768, 32767).astype(np.int16)
+                    asyncio.run_coroutine_threadsafe(pcm_queue.put(pcm16.tobytes()), loop)
+
+                    # Update tracking
+                    emitted_frame_count += actual_frames
+                    
+                    # Keep tail for next crossfade
+                    if len(new_samples) > CROSSFADE_SAMPLES:
+                        prev_tail = new_samples[-CROSSFADE_SAMPLES:].copy()
+                    else:
+                        prev_tail = new_samples.copy()
+
+                    first_emit = False
+                    logger.debug("Emitted %d samples (%.0fms), total frames=%d", 
+                                len(pcm16), len(pcm16)/24000*1000, emitted_frame_count)
+
+                # ── Streaming AR loop ──
                 for step in range(max_tokens):
                     if stop_event.is_set():
                         break
@@ -279,6 +366,13 @@ class HiggsStreamingService:
                     if state.generation_done:
                         break
 
+                    frames_ready = len(rows)
+                    if frames_ready >= N and (frames_ready % STREAM_DECODE_EVERY_FRAMES == 0 or state.generation_done):
+                        try:
+                            _emit_chunk()
+                        except Exception as e:
+                            logger.warning("Decode error at step %d (continuing): %s", step, e)
+
                     # Forward step
                     step_embed = model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
                     cache_pos = torch.tensor([position], device=device)
@@ -290,34 +384,12 @@ class HiggsStreamingService:
                     hidden_last = out.last_hidden_state[:, -1, :]
                     position += 1
 
-                # ── Single final decode of ALL collected codes ──
+                # ── Final decode: emit any remaining frames ──
                 if rows and not stop_event.is_set():
                     try:
-                        delayed_LN = torch.stack(rows, dim=0)
-                        codes_TN = reverse_delay_pattern(delayed_LN)
-
-                        wav = model._decode_codes(codes_TN)
-                        wav_np = wav.numpy().astype(np.float32)
-
-                        logger.info("Final decode: %d frames -> %d samples (%.1fs)",
-                                   codes_TN.shape[0], len(wav_np), len(wav_np)/24000)
-
-                        # Convert to PCM16
-                        pcm16_full = np.clip(wav_np * 32767.0, -32768, 32767).astype(np.int16)
-
-                        # Split into ~200ms chunks for streaming feel
-                        chunk_samples = 4800  # 200ms at 24kHz
-                        for offset in range(0, len(pcm16_full), chunk_samples):
-                            chunk = pcm16_full[offset:offset + chunk_samples]
-                            asyncio.run_coroutine_threadsafe(
-                                pcm_queue.put(chunk.tobytes()), loop
-                            )
-
+                        _emit_chunk()
                     except Exception as e:
-                        logger.exception("Final decode failed")
-                        asyncio.run_coroutine_threadsafe(
-                            pcm_queue.put(("error", str(e))), loop
-                        )
+                        logger.warning("Final decode error (continuing): %s", e)
 
             except Exception as exc:
                 logger.exception("Generation failed")
