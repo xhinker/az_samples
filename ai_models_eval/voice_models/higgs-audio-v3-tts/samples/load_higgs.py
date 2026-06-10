@@ -2,6 +2,9 @@
 # # Higgs Audio v3 TTS — Minimal Load & Test
 
 # %%
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -24,6 +27,7 @@ model = AutoModelForCausalLM.from_pretrained(
     dtype=torch.bfloat16,
     device_map="cuda:1",
 ).eval()
+model.requires_grad_(False)
 
 print("Model loaded on:", model.device)
 print("Num codebooks:", model.num_codebooks)
@@ -56,6 +60,7 @@ import gc
 device_idx = int(str(model.device).split(':')[-1])
 
 def report_vram(label=""):
+    torch.cuda.synchronize(device_idx)
     free_gb = torch.cuda.mem_get_info(device_idx)[0] / 1e9
     total_gb = torch.cuda.get_device_properties(device_idx).total_memory / 1e9
     allocated_mb = torch.cuda.memory_allocated(device_idx) / 1e6
@@ -66,7 +71,7 @@ def report_vram(label=""):
 
 report_vram("After model load")
 
-text_input = "The issue is likely that PyTorch's caching allocator keeps freed memory pooled — it doesn't return it to the system unless forced."
+# text_input = "The issue is likely that PyTorch's caching allocator keeps freed memory pooled — it doesn't return it to the system unless forced."
 text_input = "The issue is likely that PyTorch's caching allocator keeps freed memory pooled"
 N = model.num_codebooks
 
@@ -74,42 +79,44 @@ prompt_ids_list = model._build_prompt_ids(
     tokenizer, text_input, num_ref_tokens=0, reference_text=None
 )
 
-inputs_embeds   = model._prefill_embeds(prompt_ids_list, None)
-out             = model.model(inputs_embeds=inputs_embeds, use_cache=True)
-past            = out.past_key_values
-hidden_last     = out.last_hidden_state[:, -1, :]
-position        = inputs_embeds.shape[1]
-
 max_steps = min(2048, max(192, int(len(text_input.split()) * 4) + 160))
 rows = []
 
-for step in range(max_steps):
-    logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]
-    codes_N = logits_NV.argmax(dim=-1).to(torch.long)
-    rows.append(codes_N.cpu())
-    
-    if int(codes_N[0].item()) == EOC_ID and step > N:
-        break
-    
-    step_embed = model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
-    cache_pos = torch.tensor([position], device=model.device)
-    out = model.model(
-        inputs_embeds=step_embed.to(inputs_embeds.dtype),
-        past_key_values=past, use_cache=True, cache_position=cache_pos,
-    )
+with torch.inference_mode():
+    inputs_embeds = model._prefill_embeds(prompt_ids_list, None)
+    out = model.model(inputs_embeds=inputs_embeds, use_cache=True)
     past = out.past_key_values
     hidden_last = out.last_hidden_state[:, -1, :]
-    del logits_NV, codes_N, step_embed, cache_pos
-    position += 1
+    position = inputs_embeds.shape[1]
+
+    for step in range(max_steps):
+        logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]
+        codes_N = logits_NV.argmax(dim=-1).to(torch.long)
+        rows.append(codes_N.cpu())
+
+        if int(codes_N[0].item()) == EOC_ID and step > N:
+            break
+
+        step_embed = model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
+        cache_pos = torch.tensor([position], device=model.device)
+        out = model.model(
+            inputs_embeds=step_embed.to(inputs_embeds.dtype),
+            past_key_values=past, use_cache=True, cache_position=cache_pos,
+        )
+        past = out.past_key_values
+        hidden_last = out.last_hidden_state[:, -1, :]
+        del logits_NV, codes_N, step_embed, cache_pos
+        position += 1
 
 report_vram("After AR generation")
 print("Generated", len(rows), "rows")
 
 # Decode to WAV
-delayed_LN = torch.stack(rows, dim=0)
-codes_TN = reverse_delay_pattern(delayed_LN)
-wav = model._decode_codes(codes_TN.to(model.device))
-wav_np = wav.numpy().astype(np.float32)
+with torch.inference_mode():
+    delayed_LN = torch.stack(rows, dim=0)
+    codes_TN = reverse_delay_pattern(delayed_LN)
+    wav = model._decode_codes(codes_TN.to(model.device))
+    wav_np = wav.numpy().astype(np.float32)
 
 with wave.open("/tmp/higgs_test.wav", "wb") as wf:
     wf.setnchannels(1)
@@ -124,16 +131,18 @@ report_vram("After decode")
 # ── Full VRAM cleanup ───────────────────────────────────────────
 print("\nCleaning up...")
 
-for var_name in ['past', 'hidden_last', 'inputs_embeds', 'out', 
-                 'wav', 'delayed_LN', 'codes_TN', 'pcm', 'wav_np']:
-    if var_name in locals():
-        obj = locals()[var_name]
-        if hasattr(obj, 'device') and str(getattr(obj, 'device', '')).startswith('cuda'):
-            obj.cpu()
-        del obj
+for var_name in [
+    'past', 'hidden_last', 'inputs_embeds', 'out',
+    'logits_NV', 'codes_N', 'step_embed', 'cache_pos',
+    'wav', 'delayed_LN', 'codes_TN', 'pcm', 'wav_np',
+]:
+    obj = globals().pop(var_name, None)
+    if hasattr(obj, 'device') and str(getattr(obj, 'device', '')).startswith('cuda'):
+        obj.cpu()
+    del obj
 
 rows.clear()
-del rows
+globals().pop('rows', None)
 
 # Clear codec cache (DAC vocoder model stays on GPU after decode)
 if hasattr(model, '_audio_codec') and model._audio_codec is not None:
@@ -143,6 +152,7 @@ if hasattr(model, '_audio_codec') and model._audio_codec is not None:
 
 gc.collect()
 torch.cuda.empty_cache()
+torch.cuda.ipc_collect()
 
 report_vram("After cleanup")
 
@@ -158,7 +168,7 @@ print("""
 NOTE: If 'Allocated' stays high (~16GB), it's likely PyTorch's caching allocator.
 
 SOLUTION: Set this env var BEFORE starting Python to enable segment shrinking:
-  export PYTORCH_ALLOC_CONF=expandable_segments:True
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 This lets the allocator shrink freed segments instead of pooling them forever.
 Without it, PyTorch keeps peak memory pooled for reuse (faster but wastes VRAM).
