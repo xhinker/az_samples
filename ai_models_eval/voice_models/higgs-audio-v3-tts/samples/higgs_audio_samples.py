@@ -3,7 +3,7 @@
 
 # %%
 import os
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -116,6 +116,7 @@ with wave.open("/tmp/higgs_test.wav", "wb") as wf:
 print("Saved /tmp/higgs_test.wav (%.1fs audio)" % (len(wav_np)/24000))
 report_vram("After decode")
 
+#%%
 # ── Full VRAM cleanup ───────────────────────────────────────────
 print("\nCleaning up...")
 
