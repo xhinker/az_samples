@@ -298,7 +298,7 @@ print("Helpers defined.")
 
 # %%
 text_input = """
-"Wait <|prosody:pause|> are you sure about that? want me take off all my clothes?"
+"Wait <|prosody:pause|> are you sure about that?"
 """
 
 # Pre-flight validation (Codex pattern)
