@@ -140,7 +140,7 @@ def infer(
     max_steps=2048,
     temperature=0.8,
     top_k=50,
-    top_p=None,
+    top_p=0.9,
 ):
     """Run full AR generation + vocoder decode for *text_input*.
 
@@ -175,6 +175,10 @@ def infer(
         for step in range(max_steps):
             logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]  # [N, V]
             codes_N = _sampler_step(logits_NV, state, temperature, top_p, top_k)
+            
+            # Debug: show sampling params on first step  
+            if step == 0:
+                print("Sampling config: temperature=%.1f, top_k=%d, top_p=%.1f" % (temperature, top_k if top_k else 0, top_p if top_p else 0))
 
             if state.generation_done:
                 print("EOC reached at step %d (generation complete)" % step)
@@ -246,15 +250,16 @@ print("Helpers defined.")
 #     "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
 # )
 text_input = (
-    "<|emotion:determination|><|prosody:expressive_high|>"
+    "<|emotion:amusement|><|prosody:expressive_high|>"
     "Higgs Audio v3 TTS is built for voice chat: it speaks, not just reads. It turns model responses into expressive conversational speech across 100+ languages"
     "<|sfx:laughter|>haha, this so cool, so great"
 )
 
 wav_path, duration_s = infer(
     text_input,
-    temperature=0.8,   # official default (NOT 1.0/argmax!)
-    top_k=50,           # recommended from SGLang-Omni cookbook
+    temperature=0.8,   # controls diversity (lower = more focused on control tags)
+    top_k=50,           # limits per-codebook vocabulary size
+    top_p=0.9,          # nucleus sampling — CRITICAL for emotion/prosody following
 )
 
 print()
