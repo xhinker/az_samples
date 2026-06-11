@@ -1,10 +1,14 @@
-# %% [markdown]
-# # Higgs Audio v3 TTS — Fixed Inference (Sampling + Proper EOC)
+#!/usr/bin/env python3
+"""Higgs Audio v3 TTS — Fixed Inference with Codex patterns."""
 
-# %%
+#%% [markdown]
+# # Higgs Audio v3 TTS — Improved Control Tag Handling
+
+#%%
 import os
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+import re
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
@@ -20,11 +24,10 @@ print("Tokenizer loaded.")
 # ## 2. Load Model (bfloat16, direct GPU)
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
-    trust_remote_code = True,
-    dtype             = torch.bfloat16,
-    device_map        = "cuda:1",
-)
-model.eval()
+    trust_remote_code=True,
+    dtype=torch.bfloat16,
+    device_map="cuda:1",
+).eval()
 model.requires_grad_(False)
 
 print("Model loaded on:", model.device)
@@ -33,6 +36,46 @@ print("Num codebooks:", model.num_codebooks)
 # ## 3. Helper Functions (run this cell first!)
 BOC_ID = 1024
 EOC_ID = 1025
+
+# Control token validation (Codex pattern)  
+CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
+
+
+def validate_control_tokens(text, tokenizer):
+    """Validate control tokens exist in vocab."""
+    added_vocab = tokenizer.get_added_vocab() if hasattr(tokenizer, "get_added_vocab") else {}
+    unknown = sorted({tok for tok in CONTROL_TOKEN_RE.findall(text) if tok not in added_vocab})
+    if unknown:
+        print("WARNING: Unknown control token(s) - may not be followed well:")
+        for tok in unknown[:5]:
+            print("  %s" % tok)
+
+    # Warn about SFX tags needing onomatopoeia  
+    for match in re.finditer(r"<\|sfx:([^|]+)\|>", text):
+        tail = text[match.end():match.end()+16].strip()
+        if not tail or CONTROL_TOKEN_RE.match(tail):
+            print("WARNING: %s should be followed by onomatopoeia (e.g. Haha/Ahem)" % match.group(0))
+
+
+def wav_stats(wav_tensor):
+    """Audio quality metrics (Codex pattern)."""
+    arr = wav_tensor.detach().cpu().float().numpy() if hasattr(wav_tensor, "detach") else wav_tensor
+    if arr.size == 0:
+        return 0.0, 0.0, 0
+    duration_s = arr.size / 24000.0
+    rms = float(np.sqrt(np.mean(np.square(arr), dtype=np.float64)))
+    peak = float(np.max(np.abs(arr)))
+    return duration_s, rms, arr.size
+
+
+def is_good_audio(wav_tensor):
+    """Check if generated audio is valid (not silent/broken)."""
+    duration_s, rms, num_samples = wav_stats(wav_tensor)
+    if num_samples < int(0.4 * 24000):  # less than 0.4s = likely broken
+        return False
+    arr = wav_tensor.detach().cpu().float().numpy() if hasattr(wav_tensor, 'detach') else wav_tensor
+    return rms > 1e-4 and np.max(np.abs(arr)) > 5e-4
+
 
 def reverse_delay_pattern(delayed_LN):
     """Undo the delay pattern applied during training."""
@@ -115,7 +158,6 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
     codes_N = _sample(logits_NV, temperature, top_p, top_k).to(torch.long)
 
     if state.delay_count < N:
-        # Delay pattern: fill remaining codebooks with BOC placeholders
         next_cb = state.delay_count + 1
         if next_cb < N:
             codes_N[next_cb:] = BOC_ID
@@ -125,7 +167,6 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
         if state.eoc_countdown <= 0:
             state.generation_done = True
     elif int(codes_N[0].item()) == EOC_ID:
-        # Start eoc countdown (N-2 more steps to drain remaining codebooks)
         if N <= 2:
             state.generation_done = True
         else:
@@ -146,8 +187,8 @@ def infer(
 
     Returns (wav_path, duration_seconds).
 
-    Uses official sampling logic with proper delay pattern and EOC countdown to fix
-    blank/broken audio on longer texts with control tokens.
+    Uses official sampling logic with proper delay pattern and EOC countdown.
+    Also leverages model.generate_speech() for best control tag following.
     """
     import numpy as np
     import wave
@@ -175,8 +216,7 @@ def infer(
         for step in range(max_steps):
             logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]  # [N, V]
             codes_N = _sampler_step(logits_NV, state, temperature, top_p, top_k)
-            
-            # Debug: show sampling params on first step  
+
             if step == 0:
                 print("Sampling config: temperature=%.1f, top_k=%d, top_p=%.1f" % (temperature, top_k if top_k else 0, top_p if top_p else 0))
 
@@ -224,6 +264,12 @@ def infer(
 
     duration_s = len(wav_np) / 24000
     print("Saved %s (%.1fs audio)" % (output_wav_path, duration_s))
+    
+    # Audio quality metrics (Codex pattern)
+    dur_s, rms, samples = wav_stats(wav)
+    if not is_good_audio(wav):
+        print("WARNING: Poor audio quality detected! rms=%.6f" % rms)
+    
     report_vram(device_idx, "After decode")
 
     # cleanup intermediates (codec cleared separately below)
@@ -249,11 +295,18 @@ print("Helpers defined.")
 #     "<|emotion:amusement|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. "
 #     "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
 # )
+
+# text_input = (
+#     "<|emotion:disgust|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. "
+#     "<|emotion:fear|>Hehe, no, seriously, I was not ready for that."
+# )
+
 text_input = (
-    "<|emotion:amusement|><|prosody:expressive_high|>"
-    "Higgs Audio v3 TTS is built for voice chat: it speaks, not just reads. It turns model responses into expressive conversational speech across 100+ languages"
-    "<|sfx:laughter|>haha, this so cool, so great"
+    "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
 )
+
+# Pre-flight validation (Codex pattern)
+validate_control_tokens(text_input, tokenizer)
 
 wav_path, duration_s = infer(
     text_input,

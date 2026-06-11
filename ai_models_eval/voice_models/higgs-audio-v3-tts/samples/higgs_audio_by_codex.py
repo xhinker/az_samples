@@ -31,6 +31,15 @@ OUTPUT_PATH = Path("/tmp/higgs_test.wav")
 
 CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
 
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    dtype=DTYPE,
+    device_map=DEVICE_MAP,
+).eval()
+model.requires_grad_(False)
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
 @dataclass(frozen=True)
 class GenerationAttempt:
@@ -47,7 +56,6 @@ ATTEMPTS = (
     GenerationAttempt(seed=1236, temperature=0.9, top_k=80, top_p=0.95),
 )
 
-
 def report_vram(label: str, device_idx: int) -> None:
     torch.cuda.synchronize(device_idx)
     free_gb = torch.cuda.mem_get_info(device_idx)[0] / 1e9
@@ -60,7 +68,6 @@ def report_vram(label: str, device_idx: int) -> None:
         f"Allocated: {allocated_mb:.0f} MB | Reserved: {reserved_mb:.0f} MB | "
         f"Peak: {peak_mb:.0f} MB"
     )
-
 
 def validate_control_tokens(text: str, tokenizer) -> None:
     added_vocab = tokenizer.get_added_vocab()
@@ -76,7 +83,6 @@ def validate_control_tokens(text: str, tokenizer) -> None:
                 "onomatopoeia, e.g. Haha/Hehe/Ahem."
             )
 
-
 def wav_stats(wav: torch.Tensor) -> tuple[float, float, int]:
     arr = wav.detach().cpu().float().numpy()
     if arr.size == 0:
@@ -86,7 +92,6 @@ def wav_stats(wav: torch.Tensor) -> tuple[float, float, int]:
     peak = float(np.max(np.abs(arr)))
     return duration_s, rms, arr.size
 
-
 def is_good_audio(wav: torch.Tensor) -> bool:
     duration_s, rms, num_samples = wav_stats(wav)
     if num_samples < int(0.4 * SAMPLE_RATE):
@@ -95,7 +100,6 @@ def is_good_audio(wav: torch.Tensor) -> bool:
         return False
     # Silence/near-silence usually means the code stream ended badly.
     return rms > 1e-4 and float(wav.abs().max()) > 5e-4
-
 
 def write_wav(path: Path, wav: torch.Tensor) -> None:
     wav_np = wav.detach().cpu().float().numpy()
@@ -122,16 +126,7 @@ def cleanup_generation_vars(names: list[str], model=None) -> None:
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
 
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_PATH,
-    trust_remote_code=True,
-    dtype=DTYPE,
-    device_map=DEVICE_MAP,
-).eval()
-model.requires_grad_(False)
-
 def main() -> None:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     validate_control_tokens(TEXT_INPUT, tokenizer)
     print("Tokenizer loaded.")
 
@@ -198,9 +193,19 @@ if __name__ == "__main__":
     #     "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
     # )
 
+    # TEXT_INPUT = (
+    #     "<|emotion:determination|><|prosody:expressive_high|>"
+    #     "Higgs Audio v3 TTS is built for voice chat: it speaks, not just reads. It turns model responses into expressive conversational speech across 100+ languages"
+    #     "<|sfx:laughter|>haha, this so cool, so great"
+    # )
+
+    # TEXT_INPUT = (
+    #     "<|emotion:disgust|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. "
+    #     "<|emotion:fear|>Hehe, no, seriously, I was not ready for that."
+    # )
+
     TEXT_INPUT = (
-        "<|emotion:determination|><|prosody:expressive_high|>"
-        "Higgs Audio v3 TTS is built for voice chat: it speaks, not just reads. It turns model responses into expressive conversational speech across 100+ languages"
-        "<|sfx:laughter|>haha, this so cool, so great"
+        "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
     )
+
     main()
