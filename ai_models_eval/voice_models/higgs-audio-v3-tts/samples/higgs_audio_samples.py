@@ -37,12 +37,11 @@ print("Num codebooks:", model.num_codebooks)
 BOC_ID = 1024
 EOC_ID = 1025
 
-# Control token validation (Codex pattern)  
-CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
-
-
 def validate_control_tokens(text, tokenizer):
     """Validate control tokens exist in vocab."""
+    # Control token validation (Codex pattern)  
+    CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
+
     added_vocab = tokenizer.get_added_vocab() if hasattr(tokenizer, "get_added_vocab") else {}
     unknown = sorted({tok for tok in CONTROL_TOKEN_RE.findall(text) if tok not in added_vocab})
     if unknown:
@@ -50,15 +49,14 @@ def validate_control_tokens(text, tokenizer):
         for tok in unknown[:5]:
             print("  %s" % tok)
 
-    # Warn about SFX tags needing onomatopoeia  
+    # Warn about SFX(Sound Effects) tags needing onomatopoeia  
     for match in re.finditer(r"<\|sfx:([^|]+)\|>", text):
         tail = text[match.end():match.end()+16].strip()
         if not tail or CONTROL_TOKEN_RE.match(tail):
             print("WARNING: %s should be followed by onomatopoeia (e.g. Haha/Ahem)" % match.group(0))
 
-
 def wav_stats(wav_tensor):
-    """Audio quality metrics (Codex pattern)."""
+    """Audio quality metrics"""
     arr = wav_tensor.detach().cpu().float().numpy() if hasattr(wav_tensor, "detach") else wav_tensor
     if arr.size == 0:
         return 0.0, 0.0, 0
@@ -66,7 +64,6 @@ def wav_stats(wav_tensor):
     rms = float(np.sqrt(np.mean(np.square(arr), dtype=np.float64)))
     peak = float(np.max(np.abs(arr)))
     return duration_s, rms, arr.size
-
 
 def is_good_audio(wav_tensor):
     """Check if generated audio is valid (not silent/broken)."""
@@ -86,24 +83,22 @@ def reverse_delay_pattern(delayed_LN):
         out[:, c] = delayed_LN[c : c + T, c]
     return out
 
-
 def report_vram(device_idx=None, label=""):
     """Print VRAM diagnostics."""
     if device_idx is None:
         device_idx = int(str(model.device).split(":")[-1])
 
     torch.cuda.synchronize(device_idx)
-    free_gb = torch.cuda.mem_get_info(device_idx)[0] / 1e9
-    total_gb = torch.cuda.get_device_properties(device_idx).total_memory / 1e9
-    allocated_mb = torch.cuda.memory_allocated(device_idx) / 1e6
-    reserved_mb = torch.cuda.memory_reserved(device_idx) / 1e6
-    max_alloc_mb = torch.cuda.max_memory_allocated(device_idx) / 1e6
+    free_gb         = torch.cuda.mem_get_info(device_idx)[0] / 1e9
+    total_gb        = torch.cuda.get_device_properties(device_idx).total_memory / 1e9
+    allocated_mb    = torch.cuda.memory_allocated(device_idx) / 1e6
+    reserved_mb     = torch.cuda.memory_reserved(device_idx) / 1e6
+    max_alloc_mb    = torch.cuda.max_memory_allocated(device_idx) / 1e6
 
     print(
         "[%s] Free: %.1f/%.0f GB | Alloc: %.0f MB | Reserved: %.0f MB | Peak: %.0f MB"
         % (label, free_gb, total_gb, allocated_mb, reserved_mb, max_alloc_mb)
     )
-
 
 def clean_vram():
     """Aggressively reclaim VRAM after inference."""
@@ -117,7 +112,6 @@ def clean_vram():
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
-
 
 def _sample(logits_NV, temperature, top_p, top_k):
     """Official sampling logic from modeling_higgs_multimodal_qwen3.py."""
@@ -302,18 +296,43 @@ print("Helpers defined.")
 # )
 
 text_input = (
-    "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
+    "<|emotion:sadness|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
 )
+
+text_input = """
+<|emotion:sadness|>Hi, I am so sad today, I wanno cry, could you hug me!
+"""
 
 # Pre-flight validation (Codex pattern)
 validate_control_tokens(text_input, tokenizer)
 
-wav_path, duration_s = infer(
-    text_input,
-    temperature=0.8,   # controls diversity (lower = more focused on control tags)
-    top_k=50,           # limits per-codebook vocabulary size
-    top_p=0.9,          # nucleus sampling — CRITICAL for emotion/prosody following
-)
+wav_paths = []
+last_stats = (0.0, 0.0, 0)
+
+for attempt_id in range(1, 4):
+    seed = 1233 + attempt_id
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    configs = [(0.8, None, None), (0.75, 50, 0.95), (0.9, 80, 0.95)]
+    temp, top_k_val, top_p_val = configs[attempt_id - 1]
+
+    print("Attempt %d: seed=%d, temp=%.2f" % (attempt_id, seed, temp))
+    
+    wav_path_final = "/tmp/higgs_seed%d.wav" % seed
+    _, duration_s = infer(text_input, output_wav_path=wav_path_final, temperature=temp, top_k=top_k_val, top_p=top_p_val)
+
+    if duration_s > 0:
+        with wave.open(wav_path_final, "rb") as wf:
+            frames = np.frombuffer(wf.readframes(min(int(duration_s * 24000), wf.getnframes())), dtype=np.int16).astype(np.float32) / 32767.0
+        rms_val = float(np.sqrt(np.mean(frames ** 2)))
+
+        if is_good_audio(torch.tensor(frames)):
+            print("  >> GOOD (rms=%.4f)" % rms_val)  
+            break
+        else:
+            print("  >> Poor audio (rms=%.4f), trying next..." % rms_val)
 
 print()
 print("-- Cleanup --")

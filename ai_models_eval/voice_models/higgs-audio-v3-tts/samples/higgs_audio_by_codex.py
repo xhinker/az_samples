@@ -206,5 +206,8 @@ if __name__ == "__main__":
     TEXT_INPUT = (
         "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
     )
+    TEXT_INPUT = """
+<|emotion:sadness|>Hi, I am so sad today, I wanno cry, could you hug me!
+"""
 
     main()
