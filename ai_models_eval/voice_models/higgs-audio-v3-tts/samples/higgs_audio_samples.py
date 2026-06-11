@@ -171,21 +171,36 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 def infer(
     text_input,
     output_wav_path = "/tmp/higgs_test.wav",
-    max_steps       = 1024,
+    max_steps       = None,
     temperature     = 0.8,
     top_k           = 50,
     top_p           = 0.9,
 ):
     """Run full AR generation + vocoder decode for *text_input*.
 
-    Returns (wav_path, duration_seconds).
+    Args:
+        text_input: Text with optional control tags (emotion, prosody, style, sfx).
+        output_wav_path: Path to save the output WAV file (24kHz, 16-bit PCM).
+        max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
+                   from text length: min(2048, max(192, words*4 + 160)).
+                   Each step ~1 audio frame; 1024 steps ~= 13s of audio.
+                   EOC token naturally stops generation early, so this is a safety cap.
+        temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
+        top_k: Keep only top-K tokens before sampling. None = disabled.
+        top_p: Nucleus sampling threshold. None = disabled.
 
-    Uses official sampling logic with proper delay pattern and EOC countdown.
-    Also leverages model.generate_speech() for best control tag following.
+    Returns:
+        (wav_path, duration_seconds) tuple.
+
+    Uses official multi-codebook delay sampler with proper BOC/EOC handling.
     """
 
     device_idx = int(str(model.device).split(":")[-1])
     N = model.num_codebooks
+
+    # -- dynamic max_steps: ~4 AR steps/word + 160 overhead, clamped [192, 2048]
+    if max_steps is None:
+        max_steps = min(2048, max(192, int(len(text_input.split()) * 4) + 160))
 
     # -- build prompt embeddings ---------------------------------
     rows = []
