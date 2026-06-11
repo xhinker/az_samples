@@ -178,7 +178,7 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 def infer(
     text_input,
     output_wav_path="/tmp/higgs_test.wav",
-    max_steps=2048,
+    max_steps=1024,
     temperature=0.8,
     top_k=50,
     top_p=0.9,

@@ -110,7 +110,6 @@ def write_wav(path: Path, wav: torch.Tensor) -> None:
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(pcm.tobytes())
 
-
 def cleanup_generation_vars(names: list[str], model=None) -> None:
     for name in names:
         obj = globals().pop(name, None)
