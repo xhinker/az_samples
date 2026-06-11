@@ -127,26 +127,24 @@ def _sample(logits_NV, temperature, top_p, top_k):
         logits = torch.where(logits < kth, float("-inf"), logits)
 
     if top_p is not None and top_p < 1.0:
-        sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
-        cum = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
-        remove = cum > top_p
-        remove[..., 1:] = remove[..., :-1].clone()
-        remove[..., 0] = False
-        scatter = torch.zeros_like(remove)
+        sorted_logits, sorted_idx   = torch.sort(logits, descending=True, dim=-1)
+        cum                         = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+        remove                      = cum > top_p
+        remove[..., 1:]             = remove[..., :-1].clone()
+        remove[..., 0]              = False
+        scatter                     = torch.zeros_like(remove)
         scatter.scatter_(-1, sorted_idx, remove)
-        logits = torch.where(scatter, float("-inf"), logits)
+        logits                      = torch.where(scatter, float("-inf"), logits)
 
     return logits.softmax(dim=-1).multinomial(num_samples=1).squeeze(-1)
-
 
 class _SamplerState:
     """Official sampler state machine (from modeling code)."""
     def __init__(self, num_codebooks):
-        self.num_codebooks = num_codebooks
-        self.delay_count = 0
-        self.eoc_countdown = None
-        self.generation_done = False
-
+        self.num_codebooks      = num_codebooks
+        self.delay_count        = 0
+        self.eoc_countdown      = None
+        self.generation_done    = False
 
 def _sampler_step(logits_NV, state, temperature, top_p, top_k):
     """One AR step of the multi-codebook delay sampler. Mutates state."""
@@ -170,7 +168,6 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 
     return codes_N
 
-
 def infer(
     text_input,
     output_wav_path="/tmp/higgs_test.wav",
@@ -186,8 +183,6 @@ def infer(
     Uses official sampling logic with proper delay pattern and EOC countdown.
     Also leverages model.generate_speech() for best control tag following.
     """
-    import numpy as np
-    import wave
 
     device_idx = int(str(model.device).split(":")[-1])
     N = model.num_codebooks
@@ -203,11 +198,11 @@ def infer(
     state = _SamplerState(N)
 
     with torch.inference_mode():
-        inputs_embeds = model._prefill_embeds(prompt_ids_list, None)
-        out = model.model(inputs_embeds=inputs_embeds, use_cache=True)
-        past = out.past_key_values
-        hidden_last = out.last_hidden_state[:, -1, :]
-        position = inputs_embeds.shape[1]
+        inputs_embeds   = model._prefill_embeds(prompt_ids_list, None)
+        out             = model.model(inputs_embeds=inputs_embeds, use_cache=True)
+        past            = out.past_key_values
+        hidden_last     = out.last_hidden_state[:, -1, :]
+        position        = inputs_embeds.shape[1]
 
         for step in range(max_steps):
             logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]  # [N, V]
