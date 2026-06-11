@@ -7,20 +7,17 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import numpy as np
+import wave
+import gc
 
 MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
 
-# %% [markdown]
 # ## 1. Load Tokenizer
-
-# %%
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 print("Tokenizer loaded.")
 
-# %% [markdown]
 # ## 2. Load Model (bfloat16, direct GPU)
-
-# %%
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
     trust_remote_code=True,
@@ -32,10 +29,7 @@ model.requires_grad_(False)
 print("Model loaded on:", model.device)
 print("Num codebooks:", model.num_codebooks)
 
-# %% [markdown]
 # ## 3. Helper Functions (run this cell first!)
-
-# %%
 BOC_ID = 1024
 EOC_ID = 1025
 
@@ -49,14 +43,7 @@ def reverse_delay_pattern(delayed_LN):
 
 print("Helpers defined.")
 
-# %% [markdown]
 # ## 4. Generate & Decode with VRAM diagnostics
-
-# %%
-import numpy as np
-import wave
-import gc
-
 device_idx = int(str(model.device).split(':')[-1])
 
 def report_vram(label=""):
@@ -71,8 +58,9 @@ def report_vram(label=""):
 
 report_vram("After model load")
 
+#%%
 # text_input = "The issue is likely that PyTorch's caching allocator keeps freed memory pooled — it doesn't return it to the system unless forced."
-text_input = "The issue is likely that PyTorch's caching allocator keeps freed memory pooled"
+text_input = "<|emotion:amusement|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. <|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
 N = model.num_codebooks
 
 prompt_ids_list = model._build_prompt_ids(
@@ -163,13 +151,3 @@ gc.collect()
 torch.cuda.empty_cache()
 
 report_vram("After aggressive cleanup")
-
-print("""
-NOTE: If 'Allocated' stays high (~16GB), it's likely PyTorch's caching allocator.
-
-SOLUTION: Set this env var BEFORE starting Python to enable segment shrinking:
-  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-This lets the allocator shrink freed segments instead of pooling them forever.
-Without it, PyTorch keeps peak memory pooled for reuse (faster but wastes VRAM).
-""")
