@@ -76,7 +76,6 @@ def is_good_audio(wav_tensor):
         return False
     return rms > 1e-4
 
-
 def reverse_delay_pattern(delayed_LN):
     """Undo the delay pattern applied during training."""
     L, Nc = delayed_LN.shape
