@@ -170,11 +170,11 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 
 def infer(
     text_input,
-    output_wav_path="/tmp/higgs_test.wav",
-    max_steps=1024,
-    temperature=0.8,
-    top_k=50,
-    top_p=0.9,
+    output_wav_path = "/tmp/higgs_test.wav",
+    max_steps       = 1024,
+    temperature     = 0.8,
+    top_k           = 50,
+    top_p           = 0.9,
 ):
     """Run full AR generation + vocoder decode for *text_input*.
 
@@ -282,22 +282,8 @@ print("Helpers defined.")
 # ## 4. Run inference then clean up VRAM
 
 # %%
-# text_input = (
-#     "<|emotion:amusement|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. "
-#     "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
-# )
-
-# text_input = (
-#     "<|emotion:disgust|><|prosody:expressive_high|>Wait, wait, that was kind of hilarious. "
-#     "<|emotion:fear|>Hehe, no, seriously, I was not ready for that."
-# )
-
-text_input = (
-    "<|emotion:sadness|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
-)
-
 text_input = """
-<|emotion:sadness|>Hi, I am so sad today, I wanno cry, could you hug me!
+"Wait <|prosody:pause|> are you sure about that? want me take off all my clothes?"
 """
 
 # Pre-flight validation (Codex pattern)
@@ -312,7 +298,7 @@ for attempt_id in range(1, 4):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    configs = [(0.8, None, None), (0.75, 50, 0.95), (0.9, 80, 0.95)]
+    configs = [(0.5, 50, 0.95), (0.75, 50, 0.95), (0.9, 80, 0.95)]
     temp, top_k_val, top_p_val = configs[attempt_id - 1]
 
     print("Attempt %d: seed=%d, temp=%.2f" % (attempt_id, seed, temp))
