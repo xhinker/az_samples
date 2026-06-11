@@ -29,12 +29,6 @@ DTYPE = torch.bfloat16
 SAMPLE_RATE = 24_000
 OUTPUT_PATH = Path("/tmp/higgs_test.wav")
 
-TEXT_INPUT = (
-    "<|emotion:amusement|><|prosody:expressive_high|>"
-    "Wait, wait, that was kind of hilarious. "
-    "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
-)
-
 CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
 
 
@@ -128,19 +122,18 @@ def cleanup_generation_vars(names: list[str], model=None) -> None:
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
 
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    trust_remote_code=True,
+    dtype=DTYPE,
+    device_map=DEVICE_MAP,
+).eval()
+model.requires_grad_(False)
 
 def main() -> None:
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     validate_control_tokens(TEXT_INPUT, tokenizer)
     print("Tokenizer loaded.")
-
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        trust_remote_code=True,
-        dtype=DTYPE,
-        device_map=DEVICE_MAP,
-    ).eval()
-    model.requires_grad_(False)
 
     device_idx = int(str(model.device).split(":")[-1])
     print("Model loaded on:", model.device)
@@ -197,7 +190,17 @@ def main() -> None:
     cleanup_generation_vars(["wav"], model=model)
     report_vram("After cleanup", device_idx)
 
-
 #%%
 if __name__ == "__main__":
+    # TEXT_INPUT = (
+    #     "<|emotion:amusement|><|prosody:expressive_high|>"
+    #     "Wait, wait, that was kind of hilarious. "
+    #     "<|sfx:laughter|>Hehe, no, seriously, I was not ready for that."
+    # )
+
+    TEXT_INPUT = (
+        "<|emotion:determination|><|prosody:expressive_high|>"
+        "Higgs Audio v3 TTS is built for voice chat: it speaks, not just reads. It turns model responses into expressive conversational speech across 100+ languages"
+        "<|sfx:laughter|>haha, this so cool, so great"
+    )
     main()
