@@ -56,22 +56,25 @@ def validate_control_tokens(text, tokenizer):
             print("WARNING: %s should be followed by onomatopoeia (e.g. Haha/Ahem)" % match.group(0))
 
 def wav_stats(wav_tensor):
-    """Audio quality metrics"""
+    """Audio quality metrics. Returns (duration_s, rms, num_samples, peak)."""
     arr = wav_tensor.detach().cpu().float().numpy() if hasattr(wav_tensor, "detach") else wav_tensor
     if arr.size == 0:
-        return 0.0, 0.0, 0
+        return 0.0, 0.0, 0, 0.0
     duration_s = arr.size / 24000.0
     rms = float(np.sqrt(np.mean(np.square(arr), dtype=np.float64)))
     peak = float(np.max(np.abs(arr)))
-    return duration_s, rms, arr.size
+    return duration_s, rms, arr.size, peak
 
 def is_good_audio(wav_tensor):
-    """Check if generated audio is valid (not silent/broken)."""
-    duration_s, rms, num_samples = wav_stats(wav_tensor)
+    """Check if generated audio is valid (not silent/broken/clipped)."""
+    duration_s, rms, num_samples, peak = wav_stats(wav_tensor)
     if num_samples < int(0.4 * 24000):  # less than 0.4s = likely broken
         return False
-    arr = wav_tensor.detach().cpu().float().numpy() if hasattr(wav_tensor, 'detach') else wav_tensor
-    return rms > 1e-4 and np.max(np.abs(arr)) > 5e-4
+    if peak < 1e-3:  # too quiet, essentially silent
+        return False
+    if peak > 0.99:  # clipping
+        return False
+    return rms > 1e-4
 
 
 def reverse_delay_pattern(delayed_LN):
@@ -260,9 +263,9 @@ def infer(
     print("Saved %s (%.1fs audio)" % (output_wav_path, duration_s))
     
     # Audio quality metrics (Codex pattern)
-    dur_s, rms, samples = wav_stats(wav)
+    dur_s, rms, samples, peak = wav_stats(wav)
     if not is_good_audio(wav):
-        print("WARNING: Poor audio quality detected! rms=%.6f" % rms)
+        print("WARNING: Poor audio quality detected! rms=%.6f, peak=%.4f" % (rms, peak))
     
     report_vram(device_idx, "After decode")
 
@@ -307,7 +310,7 @@ text_input = """
 validate_control_tokens(text_input, tokenizer)
 
 wav_paths = []
-last_stats = (0.0, 0.0, 0)
+last_stats = (0.0, 0.0, 0, 0.0)
 
 for attempt_id in range(1, 4):
     seed = 1233 + attempt_id
@@ -327,12 +330,13 @@ for attempt_id in range(1, 4):
         with wave.open(wav_path_final, "rb") as wf:
             frames = np.frombuffer(wf.readframes(min(int(duration_s * 24000), wf.getnframes())), dtype=np.int16).astype(np.float32) / 32767.0
         rms_val = float(np.sqrt(np.mean(frames ** 2)))
+        peak_val = float(np.max(np.abs(frames)))
 
         if is_good_audio(torch.tensor(frames)):
-            print("  >> GOOD (rms=%.4f)" % rms_val)  
+            print("  >> GOOD (rms=%.4f, peak=%.4f)" % (rms_val, peak_val))  
             break
         else:
-            print("  >> Poor audio (rms=%.4f), trying next..." % rms_val)
+            print("  >> Poor audio (rms=%.4f, peak=%.4f), trying next..." % (rms_val, peak_val))
 
 print()
 print("-- Cleanup --")
