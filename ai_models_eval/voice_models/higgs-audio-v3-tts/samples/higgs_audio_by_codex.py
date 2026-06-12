@@ -49,9 +49,9 @@ class GenerationAttempt:
     top_p: float | None = None
     max_new_tokens: int = 1024
 
-
+#%%
 ATTEMPTS = (
-    GenerationAttempt(seed=1234, temperature=0.8, top_k=50, top_p=None),
+    GenerationAttempt(seed=1233, temperature=0.3, top_k=50, top_p=None),
     GenerationAttempt(seed=1235, temperature=0.75, top_k=50, top_p=0.95),
     GenerationAttempt(seed=1236, temperature=0.9, top_k=80, top_p=0.95),
 )
@@ -203,11 +203,11 @@ if __name__ == "__main__":
     #     "<|emotion:fear|>Hehe, no, seriously, I was not ready for that."
     # )
 
-    TEXT_INPUT = (
-        "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
-    )
+    # TEXT_INPUT = (
+    #     "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
+    # )
     TEXT_INPUT = """
-<|emotion:sadness|>Hi, I am so sad today, I wanno cry, could you hug me!
+数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
 """
 
     main()

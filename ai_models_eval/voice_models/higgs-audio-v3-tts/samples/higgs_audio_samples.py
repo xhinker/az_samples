@@ -83,7 +83,7 @@ def is_good_audio(wav_tensor):
         return False
     if peak < 1e-3:  # too quiet, essentially silent
         return False
-    if peak > 0.999:  # clipping (near full-scale)
+    if peak >= 1.0 and rms > 0.5:  # true clipping (sustained full-scale, not just a peak)
         return False
     return rms > 1e-4
 
@@ -220,6 +220,7 @@ def infer(
     temperature     = 0.8,
     top_k           = 50,
     top_p           = 0.9,
+    seed            = None,
     add_preroll     = True,
 ):
     """Run full AR generation + vocoder decode for *text_input*.
@@ -234,6 +235,7 @@ def infer(
         temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
         top_k: Keep only top-K tokens before sampling. None = disabled.
         top_p: Nucleus sampling threshold. None = disabled.
+        seed: Random seed for reproducible generation. None = random each time.
 
     Returns:
         (wav_path, duration_seconds) tuple.
@@ -254,6 +256,12 @@ def infer(
     if output_wav_path is None:
         ts = time.strftime("%Y%m%d_%H%M%S")
         output_wav_path = f"/tmp/higgs_{ts}_{id(text_input):08x}.wav"
+
+    # -- set random seed for reproducibility
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     # -- build prompt embeddings ---------------------------------
     rows = []
@@ -322,6 +330,12 @@ def infer(
         wav = model._decode_codes(codes_TN.to(model.device))
         wav_np = wav.numpy().astype(np.float32)
         wav_np = prepend_silence(wav_np, sample_rate=24000)
+        # Normalize volume to target RMS (~-16 LUFS equivalent for speech)
+        current_rms = float(np.sqrt(np.mean(wav_np ** 2)))
+        target_rms = 0.2  # ~-14 dBFS, typical for TTS output
+        if current_rms > 0:
+            gain = min(target_rms / current_rms, 5.0)  # cap gain at 5x to avoid noise amplification
+            wav_np = np.clip(wav_np * gain, -1.0, 1.0)
 
     # write WAV file
     with wave.open(output_wav_path, "wb") as wf:
@@ -437,8 +451,11 @@ print("Helpers defined.")
 # "Wait <|prosody:pause|> are you sure about that?"
 # """
 text_input = """
-柳生赴京赶考，行走在一条黄色大道上。他身穿一件青色布衣，下截打着密褶，头戴一顶褪色小帽，腰束一条青丝织带。恍若一棵暗翠的树木行走在黄色大道上。
+数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
 """
+# text_input = """
+# 他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。为了光耀祖宗，他踏上了黄色大道。姹紫嫣红的春天景色如一卷画一般铺展开来，柳生却视而不见。展现在他眼前的仿佛是一派暮秋落叶纷扬，足下的黄色大道也显得虚无缥缈。
+# """
 
 # Pre-flight validation (Codex pattern)
 validate_control_tokens(text_input, tokenizer)
@@ -452,13 +469,20 @@ for attempt_id in range(1, 4):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    configs = [(0.70, 50, 0.95), (0.5, 50, 0.95), (0.9, 80, 0.95)]
+    configs = [(0.75, 50, 0.95), (0.5, 50, 0.95), (0.9, 80, 0.95)]
     temp, top_k_val, top_p_val = configs[attempt_id - 1]
 
     print("Attempt %d: seed=%d, temp=%.2f" % (attempt_id, seed, temp))
     
     wav_path_final = None
-    wav_path_final, duration_s = infer(text_input, output_wav_path=wav_path_final, temperature=temp, top_k=top_k_val, top_p=top_p_val)
+    wav_path_final, duration_s = infer(
+        text_input
+        , output_wav_path=wav_path_final
+        , temperature=temp
+        , top_k=top_k_val
+        , top_p=top_p_val
+        , add_preroll = False
+    )
 
     if duration_s > 0:
         with wave.open(wav_path_final, "rb") as wf:
