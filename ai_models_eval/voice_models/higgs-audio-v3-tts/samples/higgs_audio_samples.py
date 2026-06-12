@@ -14,6 +14,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
 import wave
 import gc
+import sys
+import time
+from pathlib import Path
+
+# Add voice_models parent dir so we can import tts_utils
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tts_utils import split_text_for_reanchor, concatenate_wavs
 
 MODEL_PATH = "/mnt/data_2t_3/ai_models_all/higgs-audio-v3-tts-4b"
 
@@ -170,7 +177,7 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 
 def infer(
     text_input,
-    output_wav_path = "/tmp/higgs_test.wav",
+    output_wav_path = None,
     max_steps       = None,
     temperature     = 0.8,
     top_k           = 50,
@@ -180,7 +187,7 @@ def infer(
 
     Args:
         text_input: Text with optional control tags (emotion, prosody, style, sfx).
-        output_wav_path: Path to save the output WAV file (24kHz, 16-bit PCM).
+        output_wav_path: Path to save the output WAV (24kHz, 16-bit PCM). None = auto unique path.
         max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
                    from text length: min(2048, max(192, words*4 + 160)).
                    Each step ~1 audio frame; 1024 steps ~= 13s of audio.
@@ -201,6 +208,11 @@ def infer(
     # -- dynamic max_steps: ~4 AR steps/word + 160 overhead, clamped [192, 2048]
     if max_steps is None:
         max_steps = min(2048, max(192, int(len(text_input.split()) * 4) + 160))
+
+    # -- auto unique output path if not specified
+    if output_wav_path is None:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        output_wav_path = f"/tmp/higgs_{ts}_{id(text_input):08x}.wav"
 
     # -- build prompt embeddings ---------------------------------
     rows = []
@@ -290,6 +302,78 @@ def infer(
 
     return output_wav_path, duration_s
 
+def generate_audio(
+    text_input,
+    output_wav_path="/tmp/higgs_long.wav",
+    max_steps=None,
+    temperature=0.8,
+    top_k=50,
+    top_p=0.9,
+    target_seconds=12.0,
+    sample_rate=24000,
+):
+    """Generate audio for long text by chunking + infer + concatenate.
+
+    Splits long text (English, Chinese, or mixed) into segments,
+    runs infer() on each, then concatenates all WAVs into one file.
+
+    Args:
+        text_input: Long text with optional control tags.
+        output_wav_path: Path for the final concatenated WAV.
+        max_steps: Passed to infer(). None = auto-calculated per chunk.
+        temperature, top_k, top_p: Sampling params passed to infer().
+        target_seconds: Target duration per chunk (default 12s, well under 27s max).
+        sample_rate: Audio sample rate (must match infer output).
+
+    Returns:
+        (output_wav_path, total_duration_seconds) tuple.
+    """
+    # Split text into chunks
+    segments = split_text_for_reanchor(text_input, target_seconds=target_seconds)
+    if not segments:
+        raise ValueError("No text segments to generate.")
+
+    print(f"Text split into {len(segments)} segment(s) for generation.")
+
+    chunk_paths = []
+    for i, segment in enumerate(segments, start=1):
+        chunk_path = f"/tmp/higgs_chunk_{i:03d}.wav"
+        print(f"  [{i}/{len(segments)}] Generating: {segment[:80]}{'...' if len(segment) > 80 else ''}")
+
+        wav_path, duration_s = infer(
+            text_input      = segment,
+            output_wav_path = chunk_path,
+            max_steps       = max_steps,
+            temperature     = temperature,
+            top_k           = top_k,
+            top_p           = top_p,
+        )
+
+        if duration_s > 0:
+            chunk_paths.append(wav_path)
+            print(f"    -> {duration_s:.1f}s audio saved to {wav_path}")
+        else:
+            print(f"    -> WARNING: empty output, skipping.")
+
+    if not chunk_paths:
+        raise RuntimeError("No audio chunks were generated successfully.")
+
+    # Concatenate all chunks
+    concatenate_wavs(chunk_paths, output_wav_path, sample_rate=sample_rate)
+
+    # Read final duration
+    with wave.open(output_wav_path, "rb") as wf:
+        total_duration = wf.getnframes() / wf.getframerate()
+
+    # Clean up chunk files
+    for cp in chunk_paths:
+        try:
+            Path(cp).unlink()
+        except OSError:
+            pass
+
+    return output_wav_path, total_duration
+
 
 print("Helpers defined.")
 
@@ -318,8 +402,8 @@ for attempt_id in range(1, 4):
 
     print("Attempt %d: seed=%d, temp=%.2f" % (attempt_id, seed, temp))
     
-    wav_path_final = "/tmp/higgs_seed%d.wav" % seed
-    _, duration_s = infer(text_input, output_wav_path=wav_path_final, temperature=temp, top_k=top_k_val, top_p=top_p_val)
+    wav_path_final = None
+    wav_path_final, duration_s = infer(text_input, output_wav_path=wav_path_final, temperature=temp, top_k=top_k_val, top_p=top_p_val)
 
     if duration_s > 0:
         with wave.open(wav_path_final, "rb") as wf:
@@ -337,3 +421,5 @@ print()
 print("-- Cleanup --")
 clean_vram()
 report_vram(label="After cleanup")
+
+#%%
