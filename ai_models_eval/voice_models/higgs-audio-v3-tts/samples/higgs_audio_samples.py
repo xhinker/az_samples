@@ -324,9 +324,6 @@ def infer(
     with torch.inference_mode():
         delayed_LN = torch.stack(rows, dim=0)
         codes_TN = reverse_delay_pattern(delayed_LN)
-        # Replace BOC tokens with safe token 0 before vocoder decode
-        # (BOC_ID=1024 is outside normal audio token range, causes corruption)
-        codes_TN = torch.where(codes_TN == BOC_ID, 0, codes_TN)
         wav = model._decode_codes(codes_TN.to(model.device))
         wav_np = wav.numpy().astype(np.float32)
         wav_np = prepend_silence(wav_np, sample_rate=24000)
@@ -450,12 +447,12 @@ print("Helpers defined.")
 # text_input = """
 # "Wait <|prosody:pause|> are you sure about that?"
 # """
-text_input = """
-数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
-"""
 # text_input = """
-# 他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。为了光耀祖宗，他踏上了黄色大道。姹紫嫣红的春天景色如一卷画一般铺展开来，柳生却视而不见。展现在他眼前的仿佛是一派暮秋落叶纷扬，足下的黄色大道也显得虚无缥缈。
+# 数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
 # """
+text_input = """
+他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+"""
 
 # Pre-flight validation (Codex pattern)
 validate_control_tokens(text_input, tokenizer)
@@ -481,7 +478,7 @@ for attempt_id in range(1, 4):
         , temperature=temp
         , top_k=top_k_val
         , top_p=top_p_val
-        , add_preroll = False
+        , add_preroll = True
     )
 
     if duration_s > 0:

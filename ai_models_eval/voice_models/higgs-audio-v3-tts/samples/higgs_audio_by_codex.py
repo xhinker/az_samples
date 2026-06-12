@@ -207,7 +207,7 @@ if __name__ == "__main__":
     #     "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
     # )
     TEXT_INPUT = """
-数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
+<|prosody:pause|>他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
 """
 
     main()
