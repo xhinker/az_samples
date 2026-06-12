@@ -175,6 +175,7 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
 
     return codes_N
 
+#%%
 def infer(
     text_input,
     output_wav_path = None,
@@ -189,7 +190,7 @@ def infer(
         text_input: Text with optional control tags (emotion, prosody, style, sfx).
         output_wav_path: Path to save the output WAV (24kHz, 16-bit PCM). None = auto unique path.
         max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
-                   from text length: min(2048, max(192, words*4 + 160)).
+                   from text length: min(2048, max(192, max(words*4, chars*2) + 160)).
                    Each step ~1 audio frame; 1024 steps ~= 13s of audio.
                    EOC token naturally stops generation early, so this is a safety cap.
         temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
@@ -205,9 +206,12 @@ def infer(
     device_idx = int(str(model.device).split(":")[-1])
     N = model.num_codebooks
 
-    # -- dynamic max_steps: ~4 AR steps/word + 160 overhead, clamped [192, 2048]
-    if max_steps is None:
-        max_steps = min(2048, max(192, int(len(text_input.split()) * 4) + 160))
+    # -- dynamic max_steps: use both word count (English) and char count (CJK), clamped [192, 2048]
+    # if max_steps is None:
+    #     words = len(text_input.split())
+    #     chars = len(text_input.replace(" ", ""))
+    #     max_steps = min(2048, max(192, max(int(words * 4), int(chars * 2)) + 160))
+    max_steps = 1024
 
     # -- auto unique output path if not specified
     if output_wav_path is None:
@@ -260,7 +264,9 @@ def infer(
             position += 1
 
     report_vram(device_idx, "After AR generation")
-    print("Generated %d rows (codebooks)" % len(rows))
+    print("Generated %d rows (codebooks), max_steps was %d" % (len(rows), max_steps))
+    if len(rows) >= max_steps - N:
+        print("  WARNING: hit max_steps cap! Text may be truncated. Increase max_steps or use generate_audio() for long text.")
 
     if len(rows) < N:
         print("WARNING: Too few codebook steps (%d/%d). Output may be silent." % (len(rows), N))
@@ -330,6 +336,7 @@ def generate_audio(
     """
     # Split text into chunks
     segments = split_text_for_reanchor(text_input, target_seconds=target_seconds)
+    print(segments)
     if not segments:
         raise ValueError("No text segments to generate.")
 
@@ -381,8 +388,11 @@ print("Helpers defined.")
 # ## 4. Run inference then clean up VRAM
 
 # %%
+# text_input = """
+# "Wait <|prosody:pause|> are you sure about that?"
+# """
 text_input = """
-"Wait <|prosody:pause|> are you sure about that?"
+柳生赴京赶考，行走在一条黄色大道上。他身穿一件青色布衣，下截打着密褶，头戴一顶褪色小帽，腰束一条青丝织带。恍若一棵暗翠的树木行走在黄色大道上。此刻正是阳春时节，极目望去，一处是桃柳争妍，一处是桑麻遍野。竹篱茅舍四散开去，错落有致遥遥相望。
 """
 
 # Pre-flight validation (Codex pattern)
@@ -397,7 +407,7 @@ for attempt_id in range(1, 4):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    configs = [(0.5, 50, 0.95), (0.75, 50, 0.95), (0.9, 80, 0.95)]
+    configs = [(0.70, 50, 0.95), (0.5, 50, 0.95), (0.9, 80, 0.95)]
     temp, top_k_val, top_p_val = configs[attempt_id - 1]
 
     print("Attempt %d: seed=%d, temp=%.2f" % (attempt_id, seed, temp))
@@ -422,4 +432,23 @@ print("-- Cleanup --")
 clean_vram()
 report_vram(label="After cleanup")
 
-#%%
+#%% test long audio generation
+input_text = """
+柳生赴京赶考，行走在一条黄色大道上。他身穿一件青色布衣，下截打着密褶，头戴一顶褪色小帽，腰束一条青丝织带。恍若一棵暗翠的树木行走在黄色大道上。此刻正是阳春时节，极目望去，一处是桃柳争妍，一处是桑麻遍野。竹篱茅舍四散开去，错落有致遥遥相望。丽日悬高空，万道金光如丝在织机上，齐刷刷奔下来。
+柳生在道上行走了半日，其间只遇上两个衙门当差气昂昂擦肩而过，几个武生模样的人扬鞭摧马急驰而去，马蹄扬起的尘土遮住了前面的景致，柳生眼前一片纷纷扬扬的混乱。
+此后再不曾在道上遇上往来之人。
+数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。为了光耀祖宗，他踏上了黄色大道。姹紫嫣红的春天景色如一卷画一般铺展开来，柳生却视而不见。展现在他眼前的仿佛是一派暮秋落叶纷扬，足下的黄色大道也显得虚无缥缈。
+柳生并非富家公子，父亲生前只是一个落榜的穷儒。虽能写一手好字，画几枝风流花卉，可肩不能挑手不能提，如何能养家糊口？一家三口全仗母亲布机前日夜操劳。柳生才算勉强活到今日。然而母亲的腰弯下去后再也无法直起。柳生自小饱读诗文，由父亲一手指点。天长日久便继承了父亲的禀性，爱读邪书，也能写一手好字，画几枝风流花卉，可偏偏生疏了八股。因此当柳生踏上赴京赶考之路时父亲生前屡次落榜的窘境便笼罩了他往前走去的身影。
+柳生在走出茅舍之时，只在肩上背了一个灰色的包袱，里面一文钱也没有，只有一身换洗的衣衫和纸墨砚笔。他一路风餐露宿，靠卖些字画换得些许钱，来填腹中饥饿。他曾遇上两位同样赴京赶考的少年，都是身着锦衣绣缎的富家公子，都有一匹精神气爽的高头大马，还有伶俐聪明的书童。即便那书童的衣着，也使他相形之下惭愧不已。他没有书童，只有投在黄色大道上的身影紧紧伴随。肩上的包袱在行走时微微晃动。他听到了笔杆敲打砚台的孤单声响。
+柳生行走了半日，不觉来到了岔路口。此刻他又饥又渴，好在近旁有一河流。河流两岸芳草青青，长柳低垂。柳生行至河旁，见河水为日光所照，也是黄黄一片，只是垂柳覆盖处，才有一条条碧绿的颜色。他蹲下身去，两手插入水中，顿觉无比畅快。于是捧起点滴之水，细心洗去脸上的尘埃。此后才痛饮几口河水，饮毕席地而坐。芳草摇摇曳曳插入他的裤管，痒滋滋地有许多亲切。一条白色的鱼儿在水中独自游来游去，那躯体扭动得十分妩媚。看着鱼儿扭动，不知是因为鱼儿孤单，还是因为鱼儿妩媚，柳生有些凄然。
+半晌，柳生才站立起来，返上黄色大道，从柳荫里出来的柳生只觉头晕目眩，他是在这一刻望到远处有一堆房屋树木影影绰绰，还有依稀的城墙。柳生疾步走去。
+走到近处，听得人声沸腾，城门处有无数挑担提篮的人。
+"""
+
+audio_file,_ = generate_audio(text_input=input_text)
+print(audio_file)
+
+print()
+print("-- Cleanup --")
+clean_vram()
+report_vram(label="After cleanup")
