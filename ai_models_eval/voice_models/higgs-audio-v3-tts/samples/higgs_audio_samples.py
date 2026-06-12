@@ -79,7 +79,7 @@ def is_good_audio(wav_tensor):
         return False
     if peak < 1e-3:  # too quiet, essentially silent
         return False
-    if peak > 0.99:  # clipping
+    if peak > 0.999:  # clipping (near full-scale)
         return False
     return rms > 1e-4
 
@@ -91,6 +91,21 @@ def reverse_delay_pattern(delayed_LN):
     for c in range(Nc):
         out[:, c] = delayed_LN[c : c + T, c]
     return out
+
+def prepend_silence(wav_np, sample_rate=24000, silence_sec=0.15):
+    """Prepend a short silence buffer so audio doesn't start abruptly.
+
+    Args:
+        wav_np: Audio array (float32, -1 to 1).
+        sample_rate: Audio sample rate.
+        silence_sec: Seconds of silence to prepend.
+
+    Returns:
+        Audio array with silence prefix.
+    """
+    silence_samples = int(silence_sec * sample_rate)
+    silence = np.zeros(silence_samples, dtype=wav_np.dtype)
+    return np.concatenate([silence, wav_np])
 
 def report_vram(device_idx=None, label=""):
     """Print VRAM diagnostics."""
@@ -275,8 +290,12 @@ def infer(
     with torch.inference_mode():
         delayed_LN = torch.stack(rows, dim=0)
         codes_TN = reverse_delay_pattern(delayed_LN)
+        # Replace BOC tokens with safe token 0 before vocoder decode
+        # (BOC_ID=1024 is outside normal audio token range, causes corruption)
+        codes_TN = torch.where(codes_TN == BOC_ID, 0, codes_TN)
         wav = model._decode_codes(codes_TN.to(model.device))
         wav_np = wav.numpy().astype(np.float32)
+        wav_np = prepend_silence(wav_np, sample_rate=24000)
 
     # write WAV file
     with wave.open(output_wav_path, "wb") as wf:
@@ -392,7 +411,7 @@ print("Helpers defined.")
 # "Wait <|prosody:pause|> are you sure about that?"
 # """
 text_input = """
-柳生赴京赶考，行走在一条黄色大道上。他身穿一件青色布衣，下截打着密褶，头戴一顶褪色小帽，腰束一条青丝织带。恍若一棵暗翠的树木行走在黄色大道上。此刻正是阳春时节，极目望去，一处是桃柳争妍，一处是桑麻遍野。竹篱茅舍四散开去，错落有致遥遥相望。
+柳生赴京赶考，行走在一条黄色大道上。他身穿一件青色布衣，下截打着密褶，头戴一顶褪色小帽，腰束一条青丝织带。恍若一棵暗翠的树木行走在黄色大道上。
 """
 
 # Pre-flight validation (Codex pattern)
