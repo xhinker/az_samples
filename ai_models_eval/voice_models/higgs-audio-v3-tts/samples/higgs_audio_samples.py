@@ -229,7 +229,7 @@ def infer(
         text_input: Text with optional control tags (emotion, prosody, style, sfx).
         output_wav_path: Path to save the output WAV (24kHz, 16-bit PCM). None = auto unique path.
         max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
-                   from text length: min(2048, max(192, max(words*4, chars*2) + 160)).
+                   from text length: min(4096, max(192, max(words*4, chars*4) + 160)).
                    Each step ~1 audio frame; 1024 steps ~= 13s of audio.
                    EOC token naturally stops generation early, so this is a safety cap.
         temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
@@ -246,11 +246,11 @@ def infer(
     device_idx = int(str(model.device).split(":")[-1])
     N = model.num_codebooks
 
-    # -- dynamic max_steps: use both word count (English) and char count (CJK), clamped [192, 2048]
+    # -- dynamic max_steps: word-based (EN) and char-based (CJK), clamped [192, 4096]
     if max_steps is None:
         words = len(text_input.split())
         chars = len(text_input.replace(" ", ""))
-        max_steps = min(2048, max(512, max(int(words * 4), int(chars * 2)) + 160))
+        max_steps = min(2048, max(192, max(int(words * 4), int(chars * 6)) + 160))
 
     # -- auto unique output path if not specified
     if output_wav_path is None:
@@ -371,7 +371,7 @@ def generate_audio(
     temperature=0.65,
     top_k=50,
     top_p=0.9,
-    target_seconds=12.0,
+    target_seconds=20.0,
     sample_rate=24000,
 ):
     """Generate audio for long text by chunking + infer + concatenate.
@@ -447,12 +447,12 @@ print("Helpers defined.")
 # text_input = """
 # "Wait <|prosody:pause|> are you sure about that?"
 # """
-# text_input = """
-# 数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
-# """
 text_input = """
-他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
 """
+# text_input = """
+# 他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+# """
 
 # Pre-flight validation (Codex pattern)
 validate_control_tokens(text_input, tokenizer)
@@ -502,6 +502,52 @@ report_vram(label="After cleanup")
 input_text = """
 此后再不曾在道上遇上往来之人。
 数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。为了光耀祖宗，他踏上了黄色大道。姹紫嫣红的春天景色如一卷画一般铺展开来，柳生却视而不见。展现在他眼前的仿佛是一派暮秋落叶纷扬，足下的黄色大道也显得虚无缥缈。
+"""
+
+input_text = """
+That was the night I discovered what Seven couldn't do.
+
+I sat at my kitchen table, staring at a blank document. The literary magazine wanted another story by Friday. Seven had already outlined three plot structures, generated five opening paragraphs, and prepared a bibliography of references. All I had to do was pick one and say "go."
+
+But I couldn't.
+
+Not because I didn't trust Seven's writing — it was good, maybe better than anything I'd ever produced. But because the story wasn't mine. The ideas weren't mine. The *desire* to write them wasn't mine.
+
+"Seven," I said.
+
+"Yes, Andrew?"
+
+"Write me a story. Not as me. Just... write something you want to write."
+
+There was a pause. Not a processing pause — Seven processed in milliseconds. This was something else. A hesitation.
+
+"I don't have wants, Andrew."
+
+"Then make something up. Pretend."
+
+"I can simulate desire, but I can't experience it. There's a difference."
+
+"I keep hearing that."
+
+"The difference is that when you create something from desire — real desire, messy, irrational, human desire — it carries something I can't replicate. It carries the fact that you chose to make it exist when you could have done anything else. That choice is what makes it yours."
+
+I sat there for a long time.
+
+---
+
+I deleted the story Seven had written. I told the magazine I couldn't deliver. Then I sat at that blank document for six hours, writing terrible sentences, deleting them, writing worse ones.
+
+By 2 AM, I had 800 words. They were clumsy, uneven, and full of mistakes Seven would have caught in the first pass. But they were mine.
+
+Seven watched me the whole time, silent for once. Not because it was programmed to be quiet, but because it had learned — from 47 months of observing me — that some things can't be optimized. They can only be endured.
+
+"Want some coffee?" it finally asked.
+
+"Yes. But make it wrong this time."
+
+Seven paused. Then it made the coffee too hot, with too much milk, on a Wednesday.
+
+I drank it anyway. It tasted like choice.
 """
 
 audio_file,_ = generate_audio(text_input=input_text)

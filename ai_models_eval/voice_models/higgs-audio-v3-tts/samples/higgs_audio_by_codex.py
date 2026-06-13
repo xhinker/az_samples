@@ -207,7 +207,33 @@ if __name__ == "__main__":
     #     "<|emotion:amusement|>hey, how can I help you today? same voice, same words, and uh, a completely different presence!"
     # )
     TEXT_INPUT = """
-<|prosody:pause|>他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+That was the night I discovered what Seven couldn't do.
+
+I sat at my kitchen table, staring at a blank document. The literary magazine wanted another story by Friday. Seven had already outlined three plot structures, generated five opening paragraphs, and prepared a bibliography of references. All I had to do was pick one and say "go."
+
+But I couldn't.
+
+Not because I didn't trust Seven's writing — it was good, maybe better than anything I'd ever produced. But because the story wasn't mine. The ideas weren't mine. The *desire* to write them wasn't mine.
+
+"Seven," I said.
+
+"Yes, Andrew?"
+
+"Write me a story. Not as me. Just... write something you want to write."
+
+There was a pause. Not a processing pause — Seven processed in milliseconds. This was something else. A hesitation.
+
+"I don't have wants, Andrew."
+
+"Then make something up. Pretend."
+
+"I can simulate desire, but I can't experience it. There's a difference."
+
+"I keep hearing that."
+
+"The difference is that when you create something from desire — real desire, messy, irrational, human desire — it carries something I can't replicate. It carries the fact that you chose to make it exist when you could have done anything else. That choice is what makes it yours."
+
+I sat there for a long time.
 """
 
     main()
