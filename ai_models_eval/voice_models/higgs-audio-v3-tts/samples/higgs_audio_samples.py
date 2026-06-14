@@ -301,7 +301,7 @@ def infer(
     if max_steps is None:
         words = len(text_input.split())
         chars = len(text_input.replace(" ", ""))
-        max_steps = min(4096, max(192, max(int(words * 4), int(chars * 8)) + 160))
+        max_steps = min(2048, max(192, max(int(words * 4), int(chars * 8)) + 160))
 
     # -- auto unique output path if not specified
     if output_wav_path is None:
@@ -324,7 +324,7 @@ def infer(
 
     # -- build prompt embeddings ---------------------------------
     rows = []
-    report_vram(device_idx, "Before AR generation")
+    # report_vram(device_idx, "Before AR generation")
 
     generation_text = add_generation_preroll(text_input) if add_preroll else text_input.strip()
     if generation_text != text_input.strip():
@@ -348,9 +348,6 @@ def infer(
             logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]  # [N, V]
             codes_N = _sampler_step(logits_NV, state, temperature, top_p, top_k)
 
-            if step == 0:
-                print("Sampling config: temperature=%.1f, top_k=%d, top_p=%.1f" % (temperature, top_k if top_k else 0, top_p if top_p else 0))
-
             if state.generation_done:
                 print("EOC reached at step %d (generation complete)" % step)
                 break
@@ -372,7 +369,7 @@ def infer(
             del logits_NV, codes_N, step_embed, cache_pos
             position += 1
 
-    report_vram(device_idx, "After AR generation")
+    # report_vram(device_idx, "After AR generation")
     print("Generated %d rows (codebooks), max_steps was %d" % (len(rows), max_steps))
     if len(rows) >= max_steps - N:
         print("  WARNING: hit max_steps cap! Last sentence may be partially truncated.")
@@ -410,7 +407,7 @@ def infer(
     if not is_good_audio(wav):
         print("WARNING: Poor audio quality detected! rms=%.6f, peak=%.4f" % (rms, peak))
     
-    report_vram(device_idx, "After decode")
+    # report_vram(device_idx, "After decode")
 
     # cleanup intermediates (codec cleared separately below)
     for name in [
@@ -426,15 +423,15 @@ def infer(
 
 def generate_audio(
     text_input,
-    output_wav_path="/tmp/higgs_long.wav",
-    max_steps=None,
-    temperature=0.65,
-    top_k=50,
-    top_p=0.9,
-    target_seconds=20.0,
-    sample_rate=24000,
-    reference_audio_file=None,
-    reference_audio_text=None,
+    output_wav_path      = "/tmp/higgs_long.wav",
+    max_steps            = 2048,
+    temperature          = 0.5,
+    top_k                = 50,
+    top_p                = 0.9,
+    target_seconds       = 20.0,
+    sample_rate          = 24000,
+    reference_audio_file = None,
+    reference_audio_text = None,
 ):
     """Generate audio for long text by chunking + infer + concatenate.
 
@@ -461,16 +458,29 @@ def generate_audio(
 
     # Split text into chunks
     segments = split_text_for_reanchor(text_input, target_seconds=target_seconds)
-    print(segments)
     if not segments:
         raise ValueError("No text segments to generate.")
 
-    print(f"Text split into {len(segments)} segment(s) for generation.")
+    # Preview all chunks and validate lengths
+    print(f"Text split into {len(segments)} segment(s):")
+    max_chars = 0
+    for i, segment in enumerate(segments, 1):
+        chars = len(segment.replace(" ", ""))
+        max_chars = max(max_chars, chars)
+        preview = segment[:70] + ("..." if len(segment) > 70 else "")
+        print(f"  [{i}/{len(segments)}] {chars} chars | {preview}")
+    # Safety check: if any chunk is too long, abort
+    if max_chars > 150:
+        raise ValueError(
+            f"Chunk too long: {max_chars} chars (limit 150). "
+            "Reduce target_seconds or check split_text_for_reanchor."
+        )
+    print()
 
     chunk_paths = []
     for i, segment in enumerate(segments, start=1):
         chunk_path = f"/tmp/higgs_chunk_{i:03d}.wav"
-        print(f"  [{i}/{len(segments)}] Generating: {segment[:80]}{'...' if len(segment) > 80 else ''}")
+        print(f"  [{i}/{len(segments)}] Generating...{segment}")
 
         wav_path, duration_s = infer(
             text_input      = segment,
@@ -571,57 +581,59 @@ for attempt_id in range(1, 4):
 print()
 print("-- Cleanup --")
 clean_vram()
-report_vram(label="After cleanup")
+# report_vram(label="After cleanup")
 
 #%% test long audio generation
 input_text = """
-此后再不曾在道上遇上往来之人。
-数日前，柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。为了光耀祖宗，他踏上了黄色大道。姹紫嫣红的春天景色如一卷画一般铺展开来，柳生却视而不见。展现在他眼前的仿佛是一派暮秋落叶纷扬，足下的黄色大道也显得虚无缥缈。
+王老板已经把车门打开，胖子的一只腿伸出去，又取出来，哇地叫了一下，瞧见了装在里边的长舌帽，爬山鞋，军用水壶，雨伞，毛毯，一袋子矿泉水和三支长长短短的猎枪。说 ：“戚处长，你还真的是个猎人了!” 
+“干啥就要像啥么!”戚子绍在后车箱帮夏清将一个大旅行袋放好，这是一顶军用的野营帐篷。戚子绍低声说：“是你通知了她?”夏清说：“你打电话过来时她就在旁边，我不能瞒了她。”戚子绍说：傻女子!夏清说，我是傻。蓝底碎白花的裙子在阳光一抖，戚子绍觉得满地都是堕落的花瓣了。胖子在问王老板：“这是你的三菱吉普?多有个性的车，我就喜欢红颜色的!”王老板说：“是小了点，但爬山功能好。”戚子绍关了后车箱盖，悄悄说 ：他是我的客户。揩了夏清手背上的一点土，夏清忙把手塞进了口袋里，戚子绍却冲了胖子说：“车不错吧，老王可是个大老板喽!”胖子说：“你尽结识大老板!”戚子绍说：“也结识美女哇!”走到前面，为胖子拉开车门，很绅士地说：“请!”胖子却说：“是要我坐在前 
+边，你们坐后边呀?我也偏坐在后边!”把吃的喝的用的东西，往前边座位上堆，堆成一个小 
+山。 
 """
 
-input_text = """
-That was the night I discovered what Seven couldn't do.
+# input_text = """
+# That was the night I discovered what Seven couldn't do.
 
-I sat at my kitchen table, staring at a blank document. The literary magazine wanted another story by Friday. Seven had already outlined three plot structures, generated five opening paragraphs, and prepared a bibliography of references. All I had to do was pick one and say "go."
+# I sat at my kitchen table, staring at a blank document. The literary magazine wanted another story by Friday. Seven had already outlined three plot structures, generated five opening paragraphs, and prepared a bibliography of references. All I had to do was pick one and say "go."
 
-But I couldn't.
+# But I couldn't.
 
-Not because I didn't trust Seven's writing — it was good, maybe better than anything I'd ever produced. But because the story wasn't mine. The ideas weren't mine. The *desire* to write them wasn't mine.
+# Not because I didn't trust Seven's writing — it was good, maybe better than anything I'd ever produced. But because the story wasn't mine. The ideas weren't mine. The *desire* to write them wasn't mine.
 
-"Seven," I said.
+# "Seven," I said.
 
-"Yes, Andrew?"
+# "Yes, Andrew?"
 
-"Write me a story. Not as me. Just... write something you want to write."
+# "Write me a story. Not as me. Just... write something you want to write."
 
-There was a pause. Not a processing pause — Seven processed in milliseconds. This was something else. A hesitation.
+# There was a pause. Not a processing pause — Seven processed in milliseconds. This was something else. A hesitation.
 
-"I don't have wants, Andrew."
+# "I don't have wants, Andrew."
 
-"Then make something up. Pretend."
+# "Then make something up. Pretend."
 
-"I can simulate desire, but I can't experience it. There's a difference."
+# "I can simulate desire, but I can't experience it. There's a difference."
 
-"I keep hearing that."
+# "I keep hearing that."
 
-"The difference is that when you create something from desire — real desire, messy, irrational, human desire — it carries something I can't replicate. It carries the fact that you chose to make it exist when you could have done anything else. That choice is what makes it yours."
+# "The difference is that when you create something from desire — real desire, messy, irrational, human desire — it carries something I can't replicate. It carries the fact that you chose to make it exist when you could have done anything else. That choice is what makes it yours."
 
-I sat there for a long time.
+# I sat there for a long time.
 
-I deleted the story Seven had written. I told the magazine I couldn't deliver. Then I sat at that blank document for six hours, writing terrible sentences, deleting them, writing worse ones.
+# I deleted the story Seven had written. I told the magazine I couldn't deliver. Then I sat at that blank document for six hours, writing terrible sentences, deleting them, writing worse ones.
 
-By 2 AM, I had 800 words. They were clumsy, uneven, and full of mistakes Seven would have caught in the first pass. But they were mine.
+# By 2 AM, I had 800 words. They were clumsy, uneven, and full of mistakes Seven would have caught in the first pass. But they were mine.
 
-Seven watched me the whole time, silent for once. Not because it was programmed to be quiet, but because it had learned — from 47 months of observing me — that some things can't be optimized. They can only be endured.
+# Seven watched me the whole time, silent for once. Not because it was programmed to be quiet, but because it had learned — from 47 months of observing me — that some things can't be optimized. They can only be endured.
 
-"Want some coffee?" it finally asked.
+# "Want some coffee?" it finally asked.
 
-"Yes. But make it wrong this time."
+# "Yes. But make it wrong this time."
 
-Seven paused. Then it made the coffee too hot, with too much milk, on a Wednesday.
+# Seven paused. Then it made the coffee too hot, with too much milk, on a Wednesday.
 
-I drank it anyway. It tasted like choice.
-"""
+# I drank it anyway. It tasted like choice.
+# """
 
 audio_file,_ = generate_audio(
     text_input             = input_text
@@ -635,4 +647,4 @@ print(audio_file)
 print()
 print("-- Cleanup --")
 clean_vram()
-report_vram(label="After cleanup")
+# report_vram(label="After cleanup")
