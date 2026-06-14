@@ -8,7 +8,7 @@ from pathlib import Path
 
 # --- Text chunking constants ---
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-_SPLIT_HINT_CHARS = " ,;，；。！？!?、"
+_SPLIT_HINT_CHARS = ",;，；。！？!?、—-"  # NO space — never break mid-phrase
 TEXT_REANCHOR_MAX_WORDS = 90
 TEXT_REANCHOR_TARGET_SECONDS = 30.0
 
@@ -50,8 +50,8 @@ def split_text_for_reanchor(
         cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
         if cjk_chars >= max(8, int(non_space_chars * 0.20)):
             # CJK speech is better approximated by character count.
-            return (cjk_chars / 4.0) + ((non_space_chars - cjk_chars) / 14.0)
-        return max(words / 2.8, non_space_chars / 15.0)
+            return (cjk_chars / 4.0) + ((non_space_chars - cjk_chars) / 12.0)
+        return max(words / 2.5, non_space_chars / 12.0)
 
     def split_oversized_piece(piece: str) -> list[str]:
         normalized = " ".join(piece.strip().split())
