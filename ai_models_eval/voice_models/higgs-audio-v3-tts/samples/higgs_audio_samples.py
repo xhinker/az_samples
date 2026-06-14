@@ -96,6 +96,16 @@ def reverse_delay_pattern(delayed_LN):
         out[:, c] = delayed_LN[c : c + T, c]
     return out
 
+def apply_delay_pattern(codes_TN):
+    """Apply delay pattern to reference codes: [T, N] -> [T + N - 1, N], BOC/EOC padded."""
+    T, N = codes_TN.shape
+    out = torch.full((T + N - 1, N), EOC_ID, device=codes_TN.device, dtype=codes_TN.dtype)
+    t_idx = torch.arange(T + N - 1, device=codes_TN.device)
+    for c in range(N):
+        out[t_idx < c, c] = BOC_ID
+        out[c : c + T, c] = codes_TN[:, c]
+    return out
+
 def prepend_silence(wav_np, sample_rate=24000, silence_sec=POST_DECODE_SILENCE_SEC):
     """Prepend a short playback guard.
 
@@ -221,6 +231,9 @@ def infer(
     top_k           = 50,
     top_p           = 0.9,
     seed            = None,
+    reference_audio = None,
+    reference_sr    = None,
+    reference_text  = None,
     add_preroll     = True,
 ):
     """Run full AR generation + vocoder decode for *text_input*.
@@ -236,6 +249,9 @@ def infer(
         top_k: Keep only top-K tokens before sampling. None = disabled.
         top_p: Nucleus sampling threshold. None = disabled.
         seed: Random seed for reproducible generation. None = random each time.
+        reference_audio: Path to WAV file or numpy/torch tensor for voice cloning.
+        reference_sr: Sample rate of reference audio (auto-detected from WAV if path). None = auto.
+        reference_text: Transcript of reference audio (improves cloning quality). None = optional.
 
     Returns:
         (wav_path, duration_seconds) tuple.
@@ -263,6 +279,27 @@ def infer(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
+    # -- encode reference audio for voice cloning ---------------------------------
+    delayed_ref = None
+    if reference_audio is not None:
+        if isinstance(reference_audio, str):
+            with wave.open(reference_audio, "rb") as wf:
+                ref_sr = wf.getframerate()
+                nframes = wf.getnframes()
+                raw = wf.readframes(nframes)
+                ref_wave = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+            ref_tensor = torch.from_numpy(ref_wave).float()
+        elif isinstance(reference_audio, np.ndarray):
+            ref_tensor = torch.from_numpy(reference_audio).float()
+            ref_sr = reference_sr or 24000
+        else:
+            ref_tensor = reference_audio.float()
+            ref_sr = reference_sr or 24000
+        with torch.inference_mode():
+            codes_TN = model._encode_reference(ref_tensor, ref_sr)
+        delayed_ref = apply_delay_pattern(codes_TN.cpu())
+        print(f"  Reference audio encoded: {codes_TN.shape[0]} frames, {codes_TN.shape[1]} codebooks")
+
     # -- build prompt embeddings ---------------------------------
     rows = []
     report_vram(device_idx, "Before AR generation")
@@ -271,14 +308,15 @@ def infer(
     if generation_text != text_input.strip():
         print("  Added model-level preroll before first spoken token.")
 
+    num_ref_tokens = 0 if delayed_ref is None else delayed_ref.shape[0]
     prompt_ids_list = model._build_prompt_ids(
-        tokenizer, generation_text, num_ref_tokens=0, reference_text=None
+        tokenizer, generation_text, num_ref_tokens=num_ref_tokens, reference_text=reference_text
     )
 
     state = _SamplerState(N)
 
     with torch.inference_mode():
-        inputs_embeds   = model._prefill_embeds(prompt_ids_list, None)
+        inputs_embeds   = model._prefill_embeds(prompt_ids_list, delayed_ref)
         out             = model.model(inputs_embeds=inputs_embeds, use_cache=True)
         past            = out.past_key_values
         hidden_last     = out.last_hidden_state[:, -1, :]
@@ -447,12 +485,12 @@ print("Helpers defined.")
 # text_input = """
 # "Wait <|prosody:pause|> are you sure about that?"
 # """
-text_input = """
-柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
-"""
 # text_input = """
-# 他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+# 柳生背井离乡初次踏上这条黄色大道时，内心便涌起无数凄凉。他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了
 # """
+text_input = """
+他在走出茅舍之后，母亲布机上的沉重声响一直追赶着他，他脊背上一阵阵如灼伤般疼痛，于是父亲临终的眼神便栩栩如生地看着自己了。
+"""
 
 # Pre-flight validation (Codex pattern)
 validate_control_tokens(text_input, tokenizer)
@@ -474,11 +512,13 @@ for attempt_id in range(1, 4):
     wav_path_final = None
     wav_path_final, duration_s = infer(
         text_input
-        , output_wav_path=wav_path_final
-        , temperature=temp
-        , top_k=top_k_val
-        , top_p=top_p_val
-        , add_preroll = True
+        , output_wav_path   = wav_path_final
+        , temperature       = temp
+        , top_k             = top_k_val
+        , top_p             = top_p_val
+        , add_preroll       = True
+        , reference_audio   = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/role_voices/female_ch_1.wav'
+        , reference_text    = '今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。'
     )
 
     if duration_s > 0:
