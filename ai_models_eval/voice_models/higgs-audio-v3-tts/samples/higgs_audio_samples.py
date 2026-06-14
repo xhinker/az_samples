@@ -106,6 +106,38 @@ def apply_delay_pattern(codes_TN):
         out[c : c + T, c] = codes_TN[:, c]
     return out
 
+def encode_reference_audio(reference_audio, reference_sr=None):
+    """Encode a reference audio file once for reuse across multiple infer() calls.
+
+    The neural codec encoding is expensive. Encode once, reuse the result.
+
+    Args:
+        reference_audio: Path to WAV file, numpy array, or torch tensor.
+        reference_sr: Sample rate (auto-detected from WAV path, default 24000).
+
+    Returns:
+        delayed_ref tensor ready to pass as reference_audio to infer().
+    """
+    if isinstance(reference_audio, str):
+        with wave.open(reference_audio, "rb") as wf:
+            ref_sr = wf.getframerate()
+            nframes = wf.getnframes()
+            raw = wf.readframes(nframes)
+            ref_wave = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+        ref_tensor = torch.from_numpy(ref_wave).float()
+    elif isinstance(reference_audio, np.ndarray):
+        ref_tensor = torch.from_numpy(reference_audio).float()
+        ref_sr = reference_sr or 24000
+    else:
+        ref_tensor = reference_audio.float()
+        ref_sr = reference_sr or 24000
+
+    with torch.inference_mode():
+        codes_TN = model._encode_reference(ref_tensor, ref_sr)
+    delayed_ref = apply_delay_pattern(codes_TN.cpu())
+    print(f"  Reference encoded: {codes_TN.shape[0]} frames, {codes_TN.shape[1]} codebooks (delayed: {delayed_ref.shape[0]} rows)")
+    return delayed_ref
+
 def prepend_silence(wav_np, sample_rate=24000, silence_sec=POST_DECODE_SILENCE_SEC):
     """Prepend a short playback guard.
 
@@ -249,7 +281,9 @@ def infer(
         top_k: Keep only top-K tokens before sampling. None = disabled.
         top_p: Nucleus sampling threshold. None = disabled.
         seed: Random seed for reproducible generation. None = random each time.
-        reference_audio: Path to WAV file or numpy/torch tensor for voice cloning.
+        reference_audio: Path to WAV, numpy array, or pre-encoded delayed_ref tensor (from encode_reference_audio()) for voice cloning.
+                          NOTE: for speed, encode once with encode_reference_audio() and reuse the returned tensor.
+                          Passing a WAV path here will re-encode the audio on every call, which is slow.
         reference_sr: Sample rate of reference audio (auto-detected from WAV if path). None = auto.
         reference_text: Transcript of reference audio (improves cloning quality). None = optional.
 
@@ -279,26 +313,13 @@ def infer(
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-    # -- encode reference audio for voice cloning ---------------------------------
+    # -- reference audio: accept pre-encoded tensor (from encode_reference_audio) or raw input
     delayed_ref = None
     if reference_audio is not None:
-        if isinstance(reference_audio, str):
-            with wave.open(reference_audio, "rb") as wf:
-                ref_sr = wf.getframerate()
-                nframes = wf.getnframes()
-                raw = wf.readframes(nframes)
-                ref_wave = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-            ref_tensor = torch.from_numpy(ref_wave).float()
-        elif isinstance(reference_audio, np.ndarray):
-            ref_tensor = torch.from_numpy(reference_audio).float()
-            ref_sr = reference_sr or 24000
+        if isinstance(reference_audio, torch.Tensor):
+            delayed_ref = reference_audio  # pre-encoded, reuse directly
         else:
-            ref_tensor = reference_audio.float()
-            ref_sr = reference_sr or 24000
-        with torch.inference_mode():
-            codes_TN = model._encode_reference(ref_tensor, ref_sr)
-        delayed_ref = apply_delay_pattern(codes_TN.cpu())
-        print(f"  Reference audio encoded: {codes_TN.shape[0]} frames, {codes_TN.shape[1]} codebooks")
+            delayed_ref = encode_reference_audio(reference_audio, reference_sr)
 
     # -- build prompt embeddings ---------------------------------
     rows = []
