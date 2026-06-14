@@ -136,6 +136,7 @@ def encode_reference_audio(reference_audio, reference_sr=None):
         codes_TN = model._encode_reference(ref_tensor, ref_sr)
     delayed_ref = apply_delay_pattern(codes_TN.cpu())
     print(f"  Reference encoded: {codes_TN.shape[0]} frames, {codes_TN.shape[1]} codebooks (delayed: {delayed_ref.shape[0]} rows)")
+    clean_vram()
     return delayed_ref
 
 def prepend_silence(wav_np, sample_rate=24000, silence_sec=POST_DECODE_SILENCE_SEC):
@@ -274,7 +275,7 @@ def infer(
         text_input: Text with optional control tags (emotion, prosody, style, sfx).
         output_wav_path: Path to save the output WAV (24kHz, 16-bit PCM). None = auto unique path.
         max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
-                   from text length: min(4096, max(192, max(words*4, chars*4) + 160)).
+                   from text length: min(4096, max(192, max(words*4, chars*8) + 160)).
                    Each step ~1 audio frame; 1024 steps ~= 13s of audio.
                    EOC token naturally stops generation early, so this is a safety cap.
         temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
@@ -300,7 +301,7 @@ def infer(
     if max_steps is None:
         words = len(text_input.split())
         chars = len(text_input.replace(" ", ""))
-        max_steps = min(2048, max(192, max(int(words * 4), int(chars * 6)) + 160))
+        max_steps = min(4096, max(192, max(int(words * 4), int(chars * 8)) + 160))
 
     # -- auto unique output path if not specified
     if output_wav_path is None:
@@ -374,7 +375,7 @@ def infer(
     report_vram(device_idx, "After AR generation")
     print("Generated %d rows (codebooks), max_steps was %d" % (len(rows), max_steps))
     if len(rows) >= max_steps - N:
-        print("  WARNING: hit max_steps cap! Text may be truncated. Increase max_steps or use generate_audio() for long text.")
+        print("  WARNING: hit max_steps cap! Text may be truncated. Consider splitting into shorter chunks.")
 
     if len(rows) < N:
         print("WARNING: Too few codebook steps (%d/%d). Output may be silent." % (len(rows), N))
@@ -432,6 +433,8 @@ def generate_audio(
     top_p=0.9,
     target_seconds=20.0,
     sample_rate=24000,
+    reference_audio_file=None,
+    reference_audio_text=None,
 ):
     """Generate audio for long text by chunking + infer + concatenate.
 
@@ -445,10 +448,17 @@ def generate_audio(
         temperature, top_k, top_p: Sampling params passed to infer().
         target_seconds: Target duration per chunk (default 12s, well under 27s max).
         sample_rate: Audio sample rate (must match infer output).
+        reference_audio_file: Path to reference WAV for voice cloning. Encoded once, reused.
+        reference_audio_text: Transcript of reference audio (improves cloning quality).
 
     Returns:
         (output_wav_path, total_duration_seconds) tuple.
     """
+    # Encode reference audio once (if provided)
+    delayed_ref = None
+    if reference_audio_file is not None:
+        delayed_ref = encode_reference_audio(reference_audio_file)
+
     # Split text into chunks
     segments = split_text_for_reanchor(text_input, target_seconds=target_seconds)
     print(segments)
@@ -469,6 +479,8 @@ def generate_audio(
             temperature     = temperature,
             top_k           = top_k,
             top_p           = top_p,
+            reference_audio = delayed_ref,
+            reference_text  = reference_audio_text,
         )
 
         if duration_s > 0:
@@ -499,8 +511,10 @@ def generate_audio(
 
 print("Helpers defined.")
 
-# %% [markdown]
-# ## 4. Run inference then clean up VRAM
+#%% generate inference audio
+ref_audio_path  = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/role_voices/female_ch_1.wav'
+ref_audio_txt   = '今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。'
+delayed_ref     = encode_reference_audio(reference_audio=ref_audio_path)
 
 # %%
 # text_input = """
@@ -538,8 +552,8 @@ for attempt_id in range(1, 4):
         , top_k             = top_k_val
         , top_p             = top_p_val
         , add_preroll       = True
-        , reference_audio   = '/home/andrewzhu/storage_1t_1/az_git_folder/az_samples/ai_models_eval/voice_models/qwen3-tts/role_voices/female_ch_1.wav'
-        , reference_text    = '今夜的月光如此清亮，不做些什么真是浪费。随我一同去月下漫步吧，不许拒绝。'
+        , reference_audio   = delayed_ref
+        , reference_text    = ref_audio_txt
     )
 
     if duration_s > 0:
@@ -594,8 +608,6 @@ There was a pause. Not a processing pause — Seven processed in milliseconds. T
 
 I sat there for a long time.
 
----
-
 I deleted the story Seven had written. I told the magazine I couldn't deliver. Then I sat at that blank document for six hours, writing terrible sentences, deleting them, writing worse ones.
 
 By 2 AM, I had 800 words. They were clumsy, uneven, and full of mistakes Seven would have caught in the first pass. But they were mine.
@@ -611,9 +623,15 @@ Seven paused. Then it made the coffee too hot, with too much milk, on a Wednesda
 I drank it anyway. It tasted like choice.
 """
 
-audio_file,_ = generate_audio(text_input=input_text)
+audio_file,_ = generate_audio(
+    text_input             = input_text
+    , reference_audio_file = ref_audio_path
+    , reference_audio_text = ref_audio_txt
+)
 print(audio_file)
 
+
+#%%
 print()
 print("-- Cleanup --")
 clean_vram()
