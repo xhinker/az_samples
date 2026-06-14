@@ -50,21 +50,22 @@ def split_text_for_reanchor(
         cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
         if cjk_chars >= max(8, int(non_space_chars * 0.20)):
             # CJK speech is better approximated by character count.
-            return (cjk_chars / 5.5) + ((non_space_chars - cjk_chars) / 14.0)
+            return (cjk_chars / 4.0) + ((non_space_chars - cjk_chars) / 14.0)
         return max(words / 2.8, non_space_chars / 15.0)
 
     def split_oversized_piece(piece: str) -> list[str]:
         normalized = " ".join(piece.strip().split())
         if not normalized:
             return []
-        if estimate_seconds(normalized) <= target_seconds:
+        non_space = len(normalized.replace(" ", ""))
+        if estimate_seconds(normalized) <= target_seconds and non_space <= 120:
             return [normalized]
 
         non_space_chars = len(normalized.replace(" ", ""))
         cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
         is_cjk_heavy = cjk_chars >= max(8, int(non_space_chars * 0.20))
-        chars_per_second = 6 if is_cjk_heavy else 15
-        window = max(80, int(target_seconds * chars_per_second))
+        chars_per_second = 4 if is_cjk_heavy else 12
+        window = min(120, max(80, int(target_seconds * chars_per_second)))
 
         parts: list[str] = []
         start = 0
@@ -110,7 +111,9 @@ def split_text_for_reanchor(
                 continue
 
             candidate = piece if not current else f"{current} {piece}"
-            if current and estimate_seconds(candidate) > target_seconds:
+            candidate_chars = len(candidate.replace(" ", ""))
+            # Flush if: exceeds time target OR exceeds hard char limit (safety net)
+            if (current and estimate_seconds(candidate) > target_seconds) or candidate_chars > 120:
                 flush_current()
                 current = piece
             else:

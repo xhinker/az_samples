@@ -375,7 +375,7 @@ def infer(
     report_vram(device_idx, "After AR generation")
     print("Generated %d rows (codebooks), max_steps was %d" % (len(rows), max_steps))
     if len(rows) >= max_steps - N:
-        print("  WARNING: hit max_steps cap! Text may be truncated. Consider splitting into shorter chunks.")
+        print("  WARNING: hit max_steps cap! Last sentence may be partially truncated.")
 
     if len(rows) < N:
         print("WARNING: Too few codebook steps (%d/%d). Output may be silent." % (len(rows), N))
