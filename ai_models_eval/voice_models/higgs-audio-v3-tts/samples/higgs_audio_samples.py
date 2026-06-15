@@ -149,6 +149,28 @@ def prepend_silence(wav_np, sample_rate=24000, silence_sec=POST_DECODE_SILENCE_S
     silence = np.zeros(silence_samples, dtype=wav_np.dtype)
     return np.concatenate([silence, wav_np])
 
+def trim_trailing_silence(wav_np, sample_rate=24000, threshold=0.01, min_silence_sec=0.5):
+    """Trim trailing silence/garbage from end of decoded audio.
+
+    When model doesn't generate EOC, it keeps producing random tokens that
+    decode to noise/silence. Finds last speech frame and cuts the rest.
+    Only trims from the END -- never touches the start.
+    """
+    if len(wav_np) == 0:
+        return wav_np
+    abs_wav = np.abs(wav_np)
+    min_samples = int(min_silence_sec * sample_rate)
+    cut_point = len(wav_np)
+    for i in range(len(wav_np) - 1, min_samples - 1, -1):
+        if abs_wav[i] > threshold:
+            cut_point = i + min_samples
+            break
+    if cut_point < len(wav_np):
+        trimmed = len(wav_np) - cut_point
+        print(f"  Trimmed {trimmed/sample_rate:.1f}s trailing silence/garbage from end")
+    return wav_np[:cut_point]
+
+
 def add_generation_preroll(text, preroll_token=DEFAULT_PREROLL_TOKEN):
     """Insert a model-level pause before the first spoken token.
 
@@ -275,7 +297,7 @@ def infer(
         text_input: Text with optional control tags (emotion, prosody, style, sfx).
         output_wav_path: Path to save the output WAV (24kHz, 16-bit PCM). None = auto unique path.
         max_steps: Hard cap on AR generation steps. If None (default), auto-calculated
-                   from text length: min(4096, max(192, max(words*4, chars*8) + 160)).
+                   from text length: min(1024, max(192, max(words*4, chars*4) + 160)).
                    Each step ~1 audio frame; 1024 steps ~= 13s of audio.
                    EOC token naturally stops generation early, so this is a safety cap.
         temperature: Sampling temperature (0.5-1.2). Lower = deterministic, higher = creative.
@@ -301,7 +323,7 @@ def infer(
     if max_steps is None:
         words = len(text_input.split())
         chars = len(text_input.replace(" ", ""))
-        max_steps = min(2048, max(192, max(int(words * 4), int(chars * 8)) + 160))
+        max_steps = min(1024, max(192, max(int(words * 4), int(chars * 4)) + 160))
 
     # -- auto unique output path if not specified
     if output_wav_path is None:
@@ -384,6 +406,7 @@ def infer(
         wav = model._decode_codes(codes_TN.to(model.device))
         wav_np = wav.numpy().astype(np.float32)
         wav_np = prepend_silence(wav_np, sample_rate=24000)
+        wav_np = trim_trailing_silence(wav_np, sample_rate=24000)
         # Normalize volume to target RMS (~-16 LUFS equivalent for speech)
         current_rms = float(np.sqrt(np.mean(wav_np ** 2)))
         target_rms = 0.2  # ~-14 dBFS, typical for TTS output
@@ -585,10 +608,9 @@ clean_vram()
 
 #%% test long audio generation
 input_text = """
-王老板已经把车门打开，胖子的一只腿伸出去，又取出来，哇地叫了一下，瞧见了装在里边的长舌帽，爬山鞋，军用水壶，雨伞，毛毯，一袋子矿泉水和三支长长短短的猎枪。说 ：“戚处长，你还真的是个猎人了!” 
-“干啥就要像啥么!”戚子绍在后车箱帮夏清将一个大旅行袋放好，这是一顶军用的野营帐篷。戚子绍低声说：“是你通知了她?”夏清说：“你打电话过来时她就在旁边，我不能瞒了她。”戚子绍说：傻女子!夏清说，我是傻。蓝底碎白花的裙子在阳光一抖，戚子绍觉得满地都是堕落的花瓣了。胖子在问王老板：“这是你的三菱吉普?多有个性的车，我就喜欢红颜色的!”王老板说：“是小了点，但爬山功能好。”戚子绍关了后车箱盖，悄悄说 ：他是我的客户。揩了夏清手背上的一点土，夏清忙把手塞进了口袋里，戚子绍却冲了胖子说：“车不错吧，老王可是个大老板喽!”胖子说：“你尽结识大老板!”戚子绍说：“也结识美女哇!”走到前面，为胖子拉开车门，很绅士地说：“请!”胖子却说：“是要我坐在前 
-边，你们坐后边呀?我也偏坐在后边!”把吃的喝的用的东西，往前边座位上堆，堆成一个小 
-山。 
+新入职的人员当中就剩下黄贝贝没表态了，她十分后悔刚才为了给“闺蜜”阿鹃回一个短信，没有把握住抢答的机会；现在好，该说的都被她们说完了，自己怎么着也得写点跟她们不一样的见解吧？！好在，巧合的是，前两位强调的都是天赋，要不，自己干脆来个最基本的做人原则吧！想到这里，她冲上去大笔一挥，写上：除了天赋，最重要的是诚恳待人。这话有些讨巧，似乎适用于任何场合。
+剩下的老员工们似乎远没前三位那么积极，磨磨唧唧地挨个儿上前去，随手写了些答案。贝贝惊讶地发现，那些答案千奇百怪，居然有人说“o型血的人更适合做公关，b型血的其次，ab型血和a型血的人不适合做公关”。贝贝至今还不知道自己的血型是什么呢。
+还有人说，“学新闻的适合做公关”。
 """
 
 # input_text = """
