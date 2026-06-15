@@ -8,9 +8,12 @@ from pathlib import Path
 
 # --- Text chunking constants ---
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-_SPLIT_HINT_CHARS = ",;，；。！？!?、—-"  # NO space — never break mid-phrase
-TEXT_REANCHOR_MAX_WORDS = 90
-TEXT_REANCHOR_TARGET_SECONDS = 30.0
+_TERMINAL_PUNCT_CHARS = ".!?。！？"
+_WEAK_PUNCT_CHARS = ",;，；、:："
+_SPLIT_HINT_CHARS = _TERMINAL_PUNCT_CHARS + _WEAK_PUNCT_CHARS + "—-"  # NO space — never break mid-phrase
+_CLOSING_QUOTE_CHARS = "\"'”’）)]》」』"
+TEXT_REANCHOR_MAX_WORDS = 28
+TEXT_REANCHOR_TARGET_SECONDS = 12.0
 
 
 def split_text_for_reanchor(
@@ -38,8 +41,40 @@ def split_text_for_reanchor(
     if not clean:
         return []
 
-    sentences = [s for s in re.split(r"(?<=[.!?。！？])\s+", clean) if s]
+    sentence_pattern = rf"[^.!?。！？]+(?:[.!?。！？]+[{re.escape(_CLOSING_QUOTE_CHARS)}]*)?"
+    sentences = [m.group(0).strip() for m in re.finditer(sentence_pattern, clean) if m.group(0).strip()]
     segments: list[str] = []
+
+    def is_cjk_heavy(piece: str) -> bool:
+        non_space_chars = len(piece.replace(" ", ""))
+        cjk_chars = len(_CJK_CHAR_RE.findall(piece))
+        return cjk_chars >= max(8, int(non_space_chars * 0.20))
+
+    def segment_terminal(piece: str) -> str:
+        return "。" if is_cjk_heavy(piece) else "."
+
+    def close_tts_segment(piece: str) -> str:
+        """Make each chunk sound like a complete utterance.
+
+        Higgs often keeps generating when the text ends with weak punctuation
+        such as a comma because that means "continue" rather than "stop".
+        """
+        normalized = " ".join(piece.strip().split())
+        if not normalized:
+            return ""
+
+        suffix = ""
+        while normalized and normalized[-1] in _CLOSING_QUOTE_CHARS:
+            suffix = normalized[-1] + suffix
+            normalized = normalized[:-1].rstrip()
+
+        if not normalized:
+            return suffix
+        if normalized[-1] in _TERMINAL_PUNCT_CHARS:
+            return normalized + suffix
+        if normalized[-1] in _WEAK_PUNCT_CHARS:
+            normalized = normalized[:-1].rstrip()
+        return normalized + segment_terminal(normalized) + suffix
 
     def estimate_seconds(piece: str) -> float:
         normalized = " ".join(piece.strip().split())
@@ -48,10 +83,10 @@ def split_text_for_reanchor(
         non_space_chars = len(normalized.replace(" ", ""))
         words = len(normalized.split())
         cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
-        if cjk_chars >= max(8, int(non_space_chars * 0.20)):
+        if is_cjk_heavy(normalized):
             # CJK speech is better approximated by character count.
             return (cjk_chars / 4.0) + ((non_space_chars - cjk_chars) / 12.0)
-        return max(words / 2.5, non_space_chars / 12.0)
+        return max(words / 1.8, non_space_chars / 10.0)
 
     def split_oversized_piece(piece: str) -> list[str]:
         normalized = " ".join(piece.strip().split())
@@ -62,9 +97,17 @@ def split_text_for_reanchor(
             return [normalized]
 
         non_space_chars = len(normalized.replace(" ", ""))
-        cjk_chars = len(_CJK_CHAR_RE.findall(normalized))
-        is_cjk_heavy = cjk_chars >= max(8, int(non_space_chars * 0.20))
-        chars_per_second = 4 if is_cjk_heavy else 12
+        cjk_heavy = is_cjk_heavy(normalized)
+        words = normalized.split()
+        if not cjk_heavy and len(words) > max_words:
+            group_count = max(1, (len(words) + max_words - 1) // max_words)
+            group_size = max(1, (len(words) + group_count - 1) // group_count)
+            return [
+                " ".join(words[start : start + group_size])
+                for start in range(0, len(words), group_size)
+            ]
+
+        chars_per_second = 4 if cjk_heavy else 10
         window = min(120, max(80, int(target_seconds * chars_per_second)))
 
         parts: list[str] = []
@@ -76,9 +119,19 @@ def split_text_for_reanchor(
                 cut = -1
                 scan_start = max(start + int(window * 0.5), start + 1)
                 for idx in range(end, scan_start - 1, -1):
-                    if normalized[idx - 1] in _SPLIT_HINT_CHARS:
+                    if normalized[idx - 1] in _TERMINAL_PUNCT_CHARS:
                         cut = idx
                         break
+                if cut == -1:
+                    for idx in range(end, scan_start - 1, -1):
+                        if normalized[idx - 1] in _WEAK_PUNCT_CHARS:
+                            cut = idx
+                            break
+                if cut == -1:
+                    for idx in range(end, scan_start - 1, -1):
+                        if normalized[idx - 1] in "—-":
+                            cut = idx
+                            break
                 if cut == -1:
                     cut = end
             else:
@@ -112,15 +165,24 @@ def split_text_for_reanchor(
 
             candidate = piece if not current else f"{current} {piece}"
             candidate_chars = len(candidate.replace(" ", ""))
-            # Flush if: exceeds time target OR exceeds hard char limit (safety net)
-            if (current and estimate_seconds(candidate) > target_seconds) or candidate_chars > 120:
+            candidate_words = len(candidate.split())
+            # Flush if: exceeds time target OR exceeds hard limits (safety net)
+            if (
+                current
+                and (
+                    estimate_seconds(candidate) > target_seconds
+                    or candidate_chars > 120
+                    or candidate_words > max_words
+                )
+            ):
                 flush_current()
                 current = piece
             else:
                 current = candidate
 
     flush_current()
-    return segments if segments else [clean]
+    segments = [closed for segment in segments if (closed := close_tts_segment(segment))]
+    return segments if segments else [close_tts_segment(clean)]
 
 
 def concatenate_wavs(wav_paths: list[str], output_path: str, sample_rate: int = 24000) -> str:
