@@ -46,11 +46,32 @@ def split_text_for_reanchor(
     segments: list[str] = []
 
     def is_cjk_heavy(piece: str) -> bool:
+        """Determine if a text piece is predominantly CJK (Chinese/Japanese/Korean).
+
+        Used to pick the right speech rate: CJK is timed by character count,
+        Latin by word count. Mixed text like "Chapter 1: 今天天气很好" falls
+        back to Latin timing because English words dilute the CJK ratio.
+
+        Criteria: CJK chars must be >= 8 AND >= 20% of all non-space chars.
+        The absolute minimum (8) avoids misclassifying short fragments like
+        "你好世界" (4 chars) as CJK-heavy when they're too short to tell.
+        The 20% ratio handles mixed text: "Hello 你好" = 6 CJK of 11 total
+        = 54% but only 6 chars, so fails the absolute minimum.
+        """
         non_space_chars = len(piece.replace(" ", ""))
         cjk_chars = len(_CJK_CHAR_RE.findall(piece))
         return cjk_chars >= max(8, int(non_space_chars * 0.20))
 
     def segment_terminal(piece: str) -> str:
+        """Return the appropriate terminal punctuation for the text's language.
+
+        Used by close_tts_segment() when a chunk needs a closing period added.
+        Chinese text gets "。", English/Latin gets ".".
+
+        Without this, mixed-language chunks would get the wrong punctuation:
+        "你过得好吗" + "." → "你过得好吗." (wrong)
+        "How are you" + "。" → "How are you。" (wrong)
+        """
         return "。" if is_cjk_heavy(piece) else "."
 
     def close_tts_segment(piece: str) -> str:
@@ -59,6 +80,7 @@ def split_text_for_reanchor(
         Higgs often keeps generating when the text ends with weak punctuation
         such as a comma because that means "continue" rather than "stop".
         """
+        # Before: " Hello\t\tworld\n\n " After: "Hello world"
         normalized = " ".join(piece.strip().split())
         if not normalized:
             return ""
