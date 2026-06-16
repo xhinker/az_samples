@@ -32,8 +32,9 @@ from higgs_audio_infer import HiggsTTS, VOICE_PRESETS, SAMPLE_RATE
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 tts_engine = None
@@ -100,7 +101,7 @@ def _get_reference_audio(b64_string):
         # Move to front (LRU)
         _ref_cache_order.remove(key)
         _ref_cache_order.append(key)
-        logger.debug("Reference audio cache HIT: %s", key[:8])
+        logger.info("Reference audio cache HIT: %s", key[:8])
         return _ref_cache[key]
 
     logger.info("Reference audio cache MISS: %s, encoding...", key[:8])
