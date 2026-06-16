@@ -11,6 +11,8 @@ Usage:
 import argparse
 import asyncio
 import base64
+import hashlib
+from functools import lru_cache
 import io
 import json
 import logging
@@ -62,22 +64,58 @@ async def list_models(request):
     })
 
 
-def _decode_reference_audio(b64_string):
-    """Decode base64 reference audio to delayed_ref tensor."""
+# --- Reference audio cache ---
+# Cache encoded delayed_ref tensors to avoid re-encoding on every request.
+# Key: SHA-256 hash of the base64 input (deterministic, fixed-length).
+# Max 16 entries — enough for typical usage, bounded VRAM/CPU memory.
+_ref_cache = {}
+_REF_CACHE_MAX = 16
+_ref_cache_order = []  # LRU tracking
+
+
+def _encode_reference_audio_raw(b64_string):
+    """Decode base64 reference audio and encode via model. Returns delayed_ref tensor (CPU)."""
     ref_bytes = base64.b64decode(b64_string)
     try:
         with wave.open(io.BytesIO(ref_bytes), "rb") as wf:
             sr = wf.getframerate()
             raw = wf.readframes(wf.getnframes())
         ref_np = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
-        return tts_engine.encode_reference_audio(ref_np, sr)
+        ref = tts_engine.encode_reference_audio(ref_np, sr)
     except Exception:
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp.write(ref_bytes)
         tmp.close()
         ref = tts_engine.encode_reference_audio(tmp.name)
         os.unlink(tmp.name)
-        return ref
+    # Store on CPU to save VRAM; will be moved to GPU when used
+    return ref.cpu()
+
+
+def _get_reference_audio(b64_string):
+    """Get delayed_ref from cache or encode (with LRU eviction)."""
+    key = hashlib.sha256(b64_string.encode()).hexdigest()
+
+    if key in _ref_cache:
+        # Move to front (LRU)
+        _ref_cache_order.remove(key)
+        _ref_cache_order.append(key)
+        logger.debug("Reference audio cache HIT: %s", key[:8])
+        return _ref_cache[key]
+
+    logger.info("Reference audio cache MISS: %s, encoding...", key[:8])
+    ref = _encode_reference_audio_raw(b64_string)
+
+    # Evict oldest if at capacity
+    if len(_ref_cache) >= _REF_CACHE_MAX:
+        oldest = _ref_cache_order.pop(0)
+        evicted = _ref_cache.pop(oldest)
+        del evicted  # Free memory
+        logger.debug("Cache evicted: %s (size=%d)", oldest[:8], len(_ref_cache))
+
+    _ref_cache[key] = ref
+    _ref_cache_order.append(key)
+    return ref
 
 
 def _build_tts_params(body):
@@ -102,7 +140,7 @@ async def audio_speech(request):
         return web.json_response({"error": "Missing 'input' text"}, status=400)
 
     if body.get("reference_audio"):
-        params["reference_audio"] = _decode_reference_audio(body["reference_audio"])
+        params["reference_audio"] = _get_reference_audio(body["reference_audio"])
 
     fmt = body.get("response_format", "wav")
 
@@ -144,7 +182,7 @@ async def audio_speech_stream(request):
         return web.json_response({"error": "Missing 'input' text"}, status=400)
 
     if body.get("reference_audio"):
-        params["reference_audio"] = _decode_reference_audio(body["reference_audio"])
+        params["reference_audio"] = _get_reference_audio(body["reference_audio"])
 
     async with generation_lock:
         response = web.StreamResponse(
