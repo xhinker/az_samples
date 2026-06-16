@@ -455,19 +455,21 @@ function _ensureRingCapacity(extraSamples) {
     if (required <= _streamRingCapacity) return;
 
     let nextCapacity = _streamRingCapacity;
-    while (nextCapacity < required) {
-        nextCapacity *= 2;
-    }
+    while (nextCapacity < required) nextCapacity *= 2;
 
     const next = new Float32Array(nextCapacity);
-    for (let i = 0; i < _streamRingSize; i++) {
-        next[i] = _streamRingBuffer[(_streamRingRead + i) % _streamRingCapacity];
+    // Bulk copy with wrap-around handling (two chunks max)
+    const firstChunk = Math.min(_streamRingSize, _streamRingCapacity - _streamRingRead);
+    next.set(_streamRingBuffer.subarray(_streamRingRead, _streamRingRead + firstChunk), 0);
+    if (firstChunk < _streamRingSize) {
+        next.set(_streamRingBuffer.subarray(0, _streamRingSize - firstChunk), firstChunk);
     }
+
     _streamRingBuffer = next;
     _streamRingCapacity = nextCapacity;
     _streamRingRead = 0;
     _streamRingWrite = _streamRingSize;
-    log('Streaming buffer expanded to ' + (_streamRingCapacity / 24000).toFixed(0) + 's', 'info');
+    log('Streaming buffer expanded to ' + (nextCapacity / 24000).toFixed(0) + 's', 'info');
 }
 
 function _ringPush(samples) {
@@ -499,6 +501,15 @@ function _ringPop(count) {
 }
 
 function createPcmStream(ctx) {
+    // Reset ring buffer to baseline capacity (shrink after long streams)
+    const baseCapacity = 24000 * 60;
+    if (_streamRingBuffer.length !== baseCapacity) {
+        _streamRingBuffer = new Float32Array(baseCapacity);
+        _streamRingCapacity = baseCapacity;
+    } else {
+        // Same array, just reset pointers (avoids reallocation for typical reuse)
+        _streamRingCapacity = baseCapacity;
+    }
     _streamRingWrite = 0;
     _streamRingRead = 0;
     _streamRingSize = 0;
