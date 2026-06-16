@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Higgs Audio v3 TTS — Web Test</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔊 Higgs Audio v3 TTS</h1>
+            <p class="subtitle">Real-time text-to-speech with voice cloning &amp; emotion control</p>
+            <div class="status-bar">
+                <span id="status-indicator" class="status-dot"></span>
+                <span id="status-text">Connecting...</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- Text Input Section -->
+            <section class="card">
+                <h2>📝 Text Input</h2>
+                <textarea id="text-input" placeholder="Enter text to synthesize... (supports 100+ languages including Chinese)"
+                    rows="4">Hello, this is a test of the Higgs Audio v3 TTS system. It supports real-time streaming and voice cloning.</textarea>
+                <div class="hint">
+                    💡 Use control tokens: <code>&lt;|emotion:amusement|&gt;</code>
+                    <code>&lt;|prosody:expressive_high|&gt;</code>
+                    <code>&lt;|sfx:laughter|&gt;Haha</code>
+                </div>
+            </section>
+
+            <!-- Settings Section -->
+            <section class="card">
+                <h2>⚙️ Settings</h2>
+                <div class="settings-grid">
+                    <div class="setting">
+                        <label for="voice-select">Voice</label>
+                        <select id="voice-select">
+                            <option value="alloy" selected>Alloy (balanced)</option>
+                            <option value="echo">Echo (warm)</option>
+                            <option value="fable">Fable (crisp)</option>
+                            <option value="onyx">Onyx (deep)</option>
+                            <option value="nova">Nova (neutral)</option>
+                            <option value="shimmer">Shimmer (bright)</option>
+                        </select>
+                    </div>
+                    <div class="setting">
+                        <label for="temp-slider">Temperature: <span id="temp-value">0.80</span></label>
+                        <input type="range" id="temp-slider" min="0.1" max="2.0" step="0.05" value="0.80">
+                    </div>
+                    <div class="setting">
+                        <label for="format-select">Output Format</label>
+                        <select id="format-select">
+                            <option value="wav" selected>WAV (streaming)</option>
+                            <option value="pcm">PCM (raw streaming)</option>
+                            <option value="mp3">MP3 (download)</option>
+                        </select>
+                    </div>
+                    <div class="setting">
+                        <label for="mode-select">Mode</label>
+                        <select id="mode-select">
+                            <option value="batch" selected>Batch (full audio)</option>
+                            <option value="stream">Streaming (SSE)</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Voice Cloning Section -->
+            <section class="card collapsible">
+                <h2 onclick="this.parentElement.classList.toggle('collapsed')">🎤 Voice Cloning (optional) ▾</h2>
+                <div class="collapsible-content">
+                    <div class="upload-area" id="upload-area">
+                        <input type="file" id="ref-audio-file" accept=".wav,.mp3,.ogg" hidden>
+                        <label for="ref-audio-file" class="upload-label">
+                            📁 Click to upload reference audio (.wav / .mp3)
+                        </label>
+                        <div id="ref-file-name" class="ref-file-name"></div>
+                    </div>
+                    <textarea id="ref-text-input" placeholder="Transcript of reference audio (improves cloning quality, optional)"
+                        rows="2"></textarea>
+                </div>
+            </section>
+
+            <!-- Action Buttons -->
+            <section class="actions">
+                <button id="btn-generate" class="btn btn-primary" onclick="startGeneration()">
+                    ▶ Generate
+                </button>
+                <button id="btn-stop" class="btn btn-danger" onclick="stopGeneration()" disabled>
+                    ⏹ Stop
+                </button>
+                <button id="btn-download" class="btn btn-secondary" onclick="downloadAudio()" disabled>
+                    ⬇ Download WAV
+                </button>
+            </section>
+
+            <!-- Audio Player -->
+            <section class="card player-card">
+                <h2>🎧 Audio Output</h2>
+                <div class="player-controls">
+                    <button id="btn-play" class="btn btn-small" onclick="playAudio()" disabled>▶ Play</button>
+                    <button id="btn-pause" class="btn btn-small" onclick="pauseAudio()" disabled>⏸ Pause</button>
+                    <button id="btn-replay" class="btn btn-small" onclick="replayAudio()" disabled>↺ Replay</button>
+                    <span id="audio-duration" class="duration">0.0s</span>
+                </div>
+                <canvas id="waveform-canvas" class="waveform"></canvas>
+                <audio id="audio-element" style="display:none;"></audio>
+            </section>
+
+            <!-- Status Log -->
+            <section class="card log-card">
+                <h2>📋 Status Log</h2>
+                <div id="status-log" class="status-log"></div>
+            </section>
+        </main>
+
+        <footer>
+            <p>Higgs Audio v3 TTS API Server | bosonai/higgs-audio-v3-tts-4b | 24kHz mono PCM16</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
