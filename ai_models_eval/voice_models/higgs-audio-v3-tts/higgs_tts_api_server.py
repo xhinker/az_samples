@@ -225,16 +225,26 @@ async def audio_speech_stream(request):
                 total_bytes += len(pcm_chunk)
                 chunk_count += 1
 
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected (e.g. Stop button) — normal, not an error
+            logger.info("Client disconnected during streaming (chunk %d, %.1fs)",
+                        chunk_count, total_bytes / 2 / SAMPLE_RATE)
         except Exception as e:
             logger.error("Streaming failed: %s", e, exc_info=True)
-            error_event = {"type": "error", "message": str(e)}
-            await response.write(f"event: error\ndata: {json.dumps(error_event)}\n\n".encode())
+            try:
+                error_event = {"type": "error", "message": str(e)}
+                await response.write(f"event: error\ndata: {json.dumps(error_event)}\n\n".encode())
+            except (ConnectionResetError, BrokenPipeError):
+                pass  # Client already gone
 
-        # Send done
-        done = {"type": "done", "total_bytes": total_bytes,
-                "total_chunks": chunk_count,
-                "duration_seconds": round(total_bytes / 2 / SAMPLE_RATE, 2)}
-        await response.write(f"event: done\ndata: {json.dumps(done)}\n\n".encode())
+        # Send done (may fail if client disconnected — that's fine)
+        try:
+            done = {"type": "done", "total_bytes": total_bytes,
+                    "total_chunks": chunk_count,
+                    "duration_seconds": round(total_bytes / 2 / SAMPLE_RATE, 2)}
+            await response.write(f"event: done\ndata: {json.dumps(done)}\n\n".encode())
+        except (ConnectionResetError, BrokenPipeError):
+            pass  # Client disconnected, ignore
 
         return response
 

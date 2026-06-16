@@ -76,6 +76,33 @@ WEAK_PUNCT_CHARS = ",;，；、:："
 CLOSING_QUOTE_CHARS = "\"'\"'）)]》」』"
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
+
+def _normalize_cjk_spaces(text):
+    """Remove spaces between adjacent CJK characters.
+
+    Chinese text often has spurious spaces from OCR, copy-paste, or
+    tokenization artifacts (e.g. '特 别' should be '特别'). These spaces
+    are tokenized as pause tokens by the model, causing audible gaps.
+
+    Preserves spaces between Latin characters and between Latin and CJK:
+    - '特 别'       -> '特别'       (CJK-CJK space removed)
+    - 'Hello 世界'  -> 'Hello 世界'  (Latin-CJK space kept)
+    - 'Hello World' -> 'Hello World' (Latin-Latin space kept)
+    - '你 好 世 界' -> '你好世界'   (multiple CJK-CJK spaces removed)
+    """
+    if not text or ' ' not in text:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        if ch == ' ' and i > 0 and i < len(text) - 1:
+            prev_is_cjk = bool(_CJK_CHAR_RE.match(text[i - 1]))
+            next_is_cjk = bool(_CJK_CHAR_RE.match(text[i + 1]))
+            if prev_is_cjk and next_is_cjk:
+                continue  # skip this space
+        result.append(ch)
+    return ''.join(result)
+
+
 # OpenAI-compatible voice presets (name -> sampling params)
 VOICE_PRESETS = {
     "alloy":  {"temperature": 0.75, "top_k": 50, "top_p": 0.95, "seed": 1234},
@@ -318,6 +345,8 @@ def _ensure_terminal_punctuation(text):
     the AR loop to run until max_steps (truncated audio). This function
     adds a period (English) or 。 (Chinese) if the text lacks one.
     """
+    # First remove spurious spaces between CJK characters
+    text = _normalize_cjk_spaces(text)
     stripped = text.strip()
     if not stripped:
         return stripped
