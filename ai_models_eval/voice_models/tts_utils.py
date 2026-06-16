@@ -16,6 +16,19 @@ TEXT_REANCHOR_MAX_WORDS = 28
 TEXT_REANCHOR_TARGET_SECONDS = 12.0
 
 
+def _normalize_cjk_spaces(text: str) -> str:
+    """Remove spaces only when they are between adjacent CJK characters."""
+    if not text or " " not in text:
+        return text
+    chars: list[str] = []
+    for i, ch in enumerate(text):
+        if ch == " " and 0 < i < len(text) - 1:
+            if _CJK_CHAR_RE.match(text[i - 1]) and _CJK_CHAR_RE.match(text[i + 1]):
+                continue
+        chars.append(ch)
+    return "".join(chars)
+
+
 def split_text_for_reanchor(
     text: str,
     max_words: int = TEXT_REANCHOR_MAX_WORDS,
@@ -37,7 +50,7 @@ def split_text_for_reanchor(
     Returns:
         List of text segments, each suitable for a single TTS inference call.
     """
-    clean = " ".join(text.strip().split())
+    clean = " ".join(_normalize_cjk_spaces(text).strip().split())
     if not clean:
         return []
 
@@ -115,11 +128,12 @@ def split_text_for_reanchor(
         if not normalized:
             return []
         non_space = len(normalized.replace(" ", ""))
-        if estimate_seconds(normalized) <= target_seconds and non_space <= 120:
+        cjk_heavy = is_cjk_heavy(normalized)
+        max_chars = max(36, int(target_seconds * 4)) if cjk_heavy else 120
+        if estimate_seconds(normalized) <= target_seconds and non_space <= max_chars:
             return [normalized]
 
         non_space_chars = len(normalized.replace(" ", ""))
-        cjk_heavy = is_cjk_heavy(normalized)
         words = normalized.split()
         if not cjk_heavy and len(words) > max_words:
             group_count = max(1, (len(words) + max_words - 1) // max_words)
@@ -130,7 +144,10 @@ def split_text_for_reanchor(
             ]
 
         chars_per_second = 4 if cjk_heavy else 10
-        window = min(120, max(80, int(target_seconds * chars_per_second)))
+        if cjk_heavy:
+            window = max(36, int(target_seconds * chars_per_second))
+        else:
+            window = min(120, max(80, int(target_seconds * chars_per_second)))
 
         parts: list[str] = []
         start = 0
@@ -188,12 +205,17 @@ def split_text_for_reanchor(
             candidate = piece if not current else f"{current} {piece}"
             candidate_chars = len(candidate.replace(" ", ""))
             candidate_words = len(candidate.split())
+            candidate_char_cap = (
+                max(36, int(target_seconds * 4))
+                if is_cjk_heavy(candidate)
+                else 120
+            )
             # Flush if: exceeds time target OR exceeds hard limits (safety net)
             if (
                 current
                 and (
                     estimate_seconds(candidate) > target_seconds
-                    or candidate_chars > 120
+                    or candidate_chars > candidate_char_cap
                     or candidate_words > max_words
                 )
             ):

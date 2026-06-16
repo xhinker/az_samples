@@ -64,9 +64,17 @@ SPLIT_THRESHOLD_CHARS = 120   # split if non-space chars exceed this
 SPLIT_TARGET_SECONDS = 12.0   # target audio duration per segment
 SPLIT_MAX_WORDS = 28          # hard cap on words per segment
 
-# Streaming: sample-level overlap + crossfade for gapless playback
-STREAM_CROSSFADE_SAMPLES = 240   # 10ms linear crossfade at each batch boundary
-STREAM_HOLDBACK_SAMPLES  = 120   # holdback at right edge (vocoder unstable zone)
+# Streaming vocoder cadence. Higgs codec frames are 75 Hz at 24 kHz.
+CODEC_FRAMES_PER_SECOND = 75
+CODEC_SAMPLES_PER_FRAME = SAMPLE_RATE // CODEC_FRAMES_PER_SECOND
+STREAM_OVERLAP_TOKENS = 8
+STREAM_HOLDBACK_TOKENS = 4
+
+# Generation cap. Keep chunks short enough for this, but budget from estimated
+# speech duration instead of raw character count so CJK does not truncate.
+MIN_GENERATION_STEPS = 192
+MAX_GENERATION_STEPS = 1536
+GENERATION_SAFETY_SECONDS = 2.0
 
 # Text processing regex
 CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
@@ -149,8 +157,9 @@ def _split_text(text):
     Tries tts_utils.split_text_for_reanchor first (from the original Higgs
     codebase). Falls back to inline sentence-based splitting if unavailable.
 
-    Each segment is sized to fit comfortably within max_steps=1024 AR limit.
+    Each segment is sized to fit comfortably within the AR step budget.
     """
+    text = _normalize_cjk_spaces(text)
     if not _needs_split(text):
         return [text.strip()]
 
@@ -174,16 +183,53 @@ def _split_text(text):
     sentences = [m.group(0).strip() for m in sentence_re.finditer(clean)
                  if m.group(0).strip()]
 
+    def split_oversized_piece(piece):
+        piece = piece.strip()
+        if not piece:
+            return []
+        cjk = len(_CJK_CHAR_RE.findall(piece))
+        non_space = len(piece.replace(" ", ""))
+        cjk_heavy = cjk >= max(8, int(non_space * 0.20))
+        max_chars = max(36, int(SPLIT_TARGET_SECONDS * 4)) if cjk_heavy else SPLIT_THRESHOLD_CHARS
+        if _estimate_text_seconds(piece) <= SPLIT_TARGET_SECONDS and non_space <= max_chars:
+            return [piece]
+
+        parts = []
+        start = 0
+        while start < len(piece):
+            end = min(len(piece), start + max_chars)
+            if end < len(piece):
+                cut = -1
+                scan_start = max(start + int(max_chars * 0.5), start + 1)
+                for idx in range(end, scan_start - 1, -1):
+                    if piece[idx - 1] in TERMINAL_PUNCT_CHARS + WEAK_PUNCT_CHARS:
+                        cut = idx
+                        break
+                if cut == -1:
+                    cut = end
+            else:
+                cut = end
+            part = piece[start:cut].strip()
+            if part:
+                parts.append(part)
+            start = cut
+        return parts
+
     segments = []
     current = ""
     for sent in sentences:
-        candidate = f"{current} {sent}".strip() if current else sent
-        if (current and (_estimate_text_seconds(candidate) > SPLIT_TARGET_SECONDS
-                         or len(candidate.replace(" ", "")) > SPLIT_THRESHOLD_CHARS)):
-            segments.append(current)
-            current = sent
-        else:
-            current = candidate
+        for piece in split_oversized_piece(sent):
+            candidate = f"{current} {piece}".strip() if current else piece
+            cjk = len(_CJK_CHAR_RE.findall(candidate))
+            non_space = len(candidate.replace(" ", ""))
+            cjk_heavy = cjk >= max(8, int(non_space * 0.20))
+            max_chars = max(36, int(SPLIT_TARGET_SECONDS * 4)) if cjk_heavy else SPLIT_THRESHOLD_CHARS
+            if (current and (_estimate_text_seconds(candidate) > SPLIT_TARGET_SECONDS
+                             or non_space > max_chars)):
+                segments.append(current)
+                current = piece
+            else:
+                current = candidate
     if current:
         segments.append(current)
     return [s.strip() for s in segments if s.strip()] or [clean.strip()]
@@ -405,12 +451,13 @@ def _trim_trailing_silence(wav_np, threshold=0.01, min_silence_sec=0.5):
 def _compute_max_steps(text_input):
     """Auto-calculate AR step cap from text length.
 
-    Prevents runaway generation while allowing enough steps for the text.
-    Capped at 1024 to bound VRAM usage.
+    The AR loop produces delayed codec rows at roughly 75 rows/sec. The old
+    chars*6 budget was too small for Chinese, causing long CJK chunks to hit
+    max_steps before EOC and drop the rest of the text.
     """
-    words = len(text_input.split())
-    chars = len(text_input.replace(" ", ""))
-    return min(1024, max(192, max(int(words * 4), int(chars * 6)) + 160))
+    estimated_seconds = _estimate_text_seconds(text_input)
+    budget = int((estimated_seconds + GENERATION_SAFETY_SECONDS) * CODEC_FRAMES_PER_SECOND)
+    return min(MAX_GENERATION_STEPS, max(MIN_GENERATION_STEPS, budget + 64))
 
 
 def _normalize_audio(wav_np):
@@ -566,10 +613,8 @@ class HiggsTTS:
         bytes progressively as the AR loop generates codebook rows.
 
         Within each segment, audio is decoded every `decode_every` AR rows
-        and yielded with crossfade overlap to prevent clicks at boundaries.
-
-        Between segments, the tail of the previous segment is crossfaded
-        into the head of the next segment for seamless transitions.
+        and yielded with codec-frame overlap/holdback to avoid vocoder-edge
+        artifacts.
 
         Args:
             text_input: Text to synthesize.
@@ -591,22 +636,15 @@ class HiggsTTS:
         if len(segments) > 1:
             logger.info("Streaming %d segments", len(segments))
 
-        # Pass tail between segments for crossfade at boundaries
-        prev_tail = None
         for i, segment in enumerate(segments):
             if len(segments) > 1:
                 logger.info("Streaming segment %d/%d", i+1, len(segments))
             steps = _compute_max_steps(segment) if max_steps is None else max_steps
-            # Use a mutable container so _stream_incremental can store the tail
-            tail_holder = [None]
             for pcm in self._stream_incremental(segment, cfg, steps, chunk_size,
                                                  reference_audio, reference_text,
                                                  add_preroll, close_utterance,
-                                                 decode_every, prev_tail=prev_tail,
-                                                 tail_out=tail_holder):
+                                                 decode_every):
                 yield pcm
-            # Always reset: final batch already emitted everything including any tail
-            prev_tail = None
             self._clean_vram()
 
     def stream_from_tokens(self, text_token_generator, voice="alloy",
@@ -748,29 +786,28 @@ class HiggsTTS:
         return rows
 
     # ------------------------------------------------------------------
-    # Internal: incremental streaming with crossfade
+    # Internal: incremental streaming with codec-frame overlap
     # ------------------------------------------------------------------
 
     def _stream_incremental(self, text_input, cfg, max_steps, chunk_size,
                              reference_audio, reference_text,
                              add_preroll, close_utterance, decode_every,
                              prev_tail=None, tail_out=None):
-        """Incremental AR generation with sample-level crossfade for gapless output.
+        """Incremental AR generation with frame-aligned vocoder deltas.
 
         Architecture:
         1. AR loop generates codebook rows one-by-one
-        2. Every `decode_every` rows, decode ALL accumulated rows through vocoder
-        3. Track exact sample position (no frame-to-sample conversion drift)
-        4. Hold back right-edge samples (vocoder unstable zone)
-        5. Crossfade 10ms overlap between consecutive batches
-        6. Final flush emits everything remaining with silence trimming
+        2. Every `decode_every` rows, decode a short overlapped row window
+        3. Trim by codec frames, not arbitrary sample offsets
+        4. Hold back a few right-edge frames until the next decode
+        5. Final flush emits the remaining held-back frames
 
-        The crossfade eliminates clicks at batch boundaries by blending
-        the tail of the previous decode with the head of the new one.
+        Sample-level crossfading adjacent, non-overlapping PCM collapses time
+        and drops audio. Higgs' official streamer instead re-decodes with a
+        token overlap and trims by codec frame, which is what this mirrors.
         """
         N = self.num_codebooks
-        FADE = STREAM_CROSSFADE_SAMPLES  # 10ms crossfade region
-        HOLD = STREAM_HOLDBACK_SAMPLES   # right-edge holdback
+        samples_per_frame = CODEC_SAMPLES_PER_FRAME
 
         if cfg.seed is not None:
             torch.manual_seed(cfg.seed)
@@ -791,9 +828,7 @@ class HiggsTTS:
 
         state = _SamplerState(N)
         rows = []
-        samples_emitted = 0   # exact sample count already yielded
-        # prev_tail: FADE samples from previous batch/segment for crossfade
-        _prev_tail = prev_tail  # use passed-in tail (from previous segment) or None
+        emitted_raw_frames = 0
 
         def _yield_pcm(segment):
             """Convert a float32 audio segment to PCM16LE bytes and yield."""
@@ -807,59 +842,62 @@ class HiggsTTS:
                 yield struct.pack("<%dh" % (e - off), *pcm[off:e])
                 off = e
 
-        def _crossfade(old_tail, new_head, fade_len):
-            """Linear crossfade: old fades out, new fades in over fade_len samples."""
-            fl = min(fade_len, len(old_tail), len(new_head))
-            if fl <= 0:
-                return np.concatenate([old_tail, new_head])
-            fade_out = np.linspace(1.0, 0.0, fl)
-            fade_in = np.linspace(0.0, 1.0, fl)
-            blended = old_tail[-fl:] * fade_out + new_head[:fl] * fade_in
-            return np.concatenate([old_tail[:-fl], blended, new_head[fl:]])
+        def _codec_samples_per_frame(wav_len, raw_frames):
+            codec = getattr(self.model, "_audio_codec", None)
+            codec_model = getattr(codec, "model", None)
+            codec_config = getattr(codec_model, "config", None)
+            hop_length = getattr(codec_config, "hop_length", None)
+            if hop_length is not None:
+                try:
+                    hop_length = int(hop_length)
+                    if hop_length > 0:
+                        return hop_length
+                except (TypeError, ValueError):
+                    pass
+            if raw_frames > 0 and wav_len > 0:
+                return max(1, int(round(wav_len / raw_frames)))
+            return CODEC_SAMPLES_PER_FRAME
 
-        def _emit_batch(is_final=False):
-            """Decode current rows, crossfade with previous tail, emit new samples.
-
-            Strategy: decode ALL rows each time (full context = most stable samples).
-            Track exact sample position to avoid drift. Hold back right edge.
-            """
-            nonlocal samples_emitted, _prev_tail
+        def _decode_delta(is_final=False):
+            """Decode current rows and emit only the new stable codec frames."""
+            nonlocal emitted_raw_frames, samples_per_frame
 
             if len(rows) < N:
                 return
 
-            # Decode ALL accumulated rows for maximum stability
-            delayed_LN = torch.stack(rows, dim=0)
+            raw_total = len(rows) - N + 1
+            emit_until_raw = raw_total
+            if not is_final:
+                emit_until_raw = max(0, raw_total - STREAM_HOLDBACK_TOKENS)
+
+            if emit_until_raw < emitted_raw_frames:
+                return
+            if emit_until_raw == emitted_raw_frames and not is_final:
+                return
+
+            window_start_raw = max(0, emitted_raw_frames - STREAM_OVERLAP_TOKENS)
+            rows_end = emit_until_raw + N - 1
+            delayed_LN = torch.stack(rows[window_start_raw:rows_end], dim=0)
             codes_TN = _reverse_delay_pattern(delayed_LN)
             wav = self.model._decode_codes(codes_TN.to(self.model.device))
             wav_np = wav.numpy().astype(np.float32)
-            total_samples = len(wav_np)
 
-            if total_samples <= samples_emitted:
-                del delayed_LN, codes_TN, wav, wav_np
-                return
+            decoded_raw_frames = emit_until_raw - window_start_raw
+            samples_per_frame = _codec_samples_per_frame(len(wav_np), decoded_raw_frames)
+            trim_frames = emitted_raw_frames - window_start_raw
+            trim_samples = min(trim_frames * samples_per_frame, len(wav_np))
 
-            # How far to emit: all samples (final) or minus holdback (incremental)
-            emit_to = total_samples if is_final else max(samples_emitted + 1, total_samples - HOLD)
-
-            # Extract new audio segment
-            new_audio = wav_np[samples_emitted:emit_to].copy()
-
-            # Crossfade with previous batch's tail to eliminate clicks
-            if _prev_tail is not None and len(_prev_tail) > 0:
-                new_audio = _crossfade(_prev_tail, new_audio, FADE)
-
-            # Keep tail for next crossfade (unless this is the final batch)
-            if not is_final and len(new_audio) > FADE:
-                _prev_tail = new_audio[-FADE:].copy()
-                new_audio = new_audio[:-FADE]   # don't emit the tail yet
+            if is_final:
+                segment = wav_np[trim_samples:]
+                segment = _trim_trailing_silence(segment)
             else:
-                _prev_tail = None
+                new_frames = emit_until_raw - emitted_raw_frames
+                emit_samples = new_frames * samples_per_frame
+                segment = wav_np[trim_samples:trim_samples + emit_samples]
 
-            if len(new_audio) > 0:
-
-                yield from _yield_pcm(new_audio)
-                samples_emitted = emit_to
+            if len(segment) > 0:
+                yield from _yield_pcm(segment)
+            emitted_raw_frames = emit_until_raw
 
             del delayed_LN, codes_TN, wav, wav_np
 
@@ -879,9 +917,10 @@ class HiggsTTS:
 
                 # Incremental decode: yield audio every decode_every rows
                 if len(rows) >= N + decode_every and (len(rows) - N) % decode_every == 0:
-                    yield from _emit_batch(is_final=False)
+                    yield from _decode_delta(is_final=False)
                     logger.debug("Emitted %.1fs (step %d, rows %d)",
-                                 samples_emitted / SAMPLE_RATE, step, len(rows))
+                                 emitted_raw_frames * samples_per_frame / SAMPLE_RATE,
+                                 step, len(rows))
 
                 # Feed sampled codes back into the model
                 step_emb = self.model.audio_embedding(codes.unsqueeze(0)).unsqueeze(1)
@@ -894,14 +933,13 @@ class HiggsTTS:
 
             # Final flush: emit all remaining samples including holdback zone
             if rows:
-                yield from _emit_batch(is_final=True)
+                yield from _decode_delta(is_final=True)
 
-            # Store final tail for inter-segment crossfade (if any remaining)
             if tail_out is not None:
-                tail_out[0] = _prev_tail
+                tail_out[0] = None
 
             logger.info("Stream done: %d rows, %.1fs total audio",
-                        len(rows), samples_emitted / SAMPLE_RATE)
+                        len(rows), emitted_raw_frames * samples_per_frame / SAMPLE_RATE)
 
     # ------------------------------------------------------------------
     # Internal: batch decode + post-processing

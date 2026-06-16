@@ -444,32 +444,43 @@ async function startStreaming(payload, abortCtrl) {
 
 // --- PCM streaming playback — ring buffer + ScriptProcessorNode, no overlaps ---
 let _streamProcessor = null;
-let _streamRingBuffer = new Float32Array(24000 * 30); // 30s max ring buffer at 24kHz
+let _streamRingCapacity = 24000 * 60; // grows for long streams
+let _streamRingBuffer = new Float32Array(_streamRingCapacity);
 let _streamRingWrite = 0;
 let _streamRingRead = 0;
 let _streamRingSize = 0;
-const _STREAM_RING_MAX = 24000 * 30;
+
+function _ensureRingCapacity(extraSamples) {
+    const required = _streamRingSize + extraSamples;
+    if (required <= _streamRingCapacity) return;
+
+    let nextCapacity = _streamRingCapacity;
+    while (nextCapacity < required) {
+        nextCapacity *= 2;
+    }
+
+    const next = new Float32Array(nextCapacity);
+    for (let i = 0; i < _streamRingSize; i++) {
+        next[i] = _streamRingBuffer[(_streamRingRead + i) % _streamRingCapacity];
+    }
+    _streamRingBuffer = next;
+    _streamRingCapacity = nextCapacity;
+    _streamRingRead = 0;
+    _streamRingWrite = _streamRingSize;
+    log('Streaming buffer expanded to ' + (_streamRingCapacity / 24000).toFixed(0) + 's', 'info');
+}
 
 function _ringPush(samples) {
     const len = samples.length;
-    // Prevent overflow: don't overwrite unread data
-    if (_streamRingSize + len > _STREAM_RING_MAX) {
-        // Buffer is near full — drop excess to avoid corruption
-        const available = _STREAM_RING_MAX - _streamRingSize;
-        if (available <= 0) return; // completely full, skip this push
-        log('Ring buffer near full (' + (_streamRingSize / 24000).toFixed(1) + 's), dropping ' +
-            ((len - available) / 24000).toFixed(1) + 's', 'warning');
-        _ringPush(samples.subarray(0, available));
-        return;
-    }
-    const half = _STREAM_RING_MAX - _streamRingWrite;
+    _ensureRingCapacity(len);
+    const half = _streamRingCapacity - _streamRingWrite;
     if (len <= half) {
         _streamRingBuffer.set(samples, _streamRingWrite);
     } else {
         _streamRingBuffer.set(samples.subarray(0, half), _streamRingWrite);
         _streamRingBuffer.set(samples.subarray(half), 0);
     }
-    _streamRingWrite = (_streamRingWrite + len) % _STREAM_RING_MAX;
+    _streamRingWrite = (_streamRingWrite + len) % _streamRingCapacity;
     _streamRingSize += len;
 }
 
@@ -479,7 +490,7 @@ function _ringPop(count) {
     const out = new Float32Array(count);
     for (let i = 0; i < available; i++) {
         out[i] = _streamRingBuffer[_streamRingRead];
-        _streamRingRead = (_streamRingRead + 1) % _STREAM_RING_MAX;
+        _streamRingRead = (_streamRingRead + 1) % _streamRingCapacity;
         _streamRingSize--;
     }
     // Fill remainder with silence
