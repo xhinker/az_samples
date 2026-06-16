@@ -452,6 +452,16 @@ const _STREAM_RING_MAX = 24000 * 30;
 
 function _ringPush(samples) {
     const len = samples.length;
+    // Prevent overflow: don't overwrite unread data
+    if (_streamRingSize + len > _STREAM_RING_MAX) {
+        // Buffer is near full — drop excess to avoid corruption
+        const available = _STREAM_RING_MAX - _streamRingSize;
+        if (available <= 0) return; // completely full, skip this push
+        log('Ring buffer near full (' + (_streamRingSize / 24000).toFixed(1) + 's), dropping ' +
+            ((len - available) / 24000).toFixed(1) + 's', 'warning');
+        _ringPush(samples.subarray(0, available));
+        return;
+    }
     const half = _STREAM_RING_MAX - _streamRingWrite;
     if (len <= half) {
         _streamRingBuffer.set(samples, _streamRingWrite);

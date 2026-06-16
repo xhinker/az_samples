@@ -605,7 +605,8 @@ class HiggsTTS:
                                                  decode_every, prev_tail=prev_tail,
                                                  tail_out=tail_holder):
                 yield pcm
-            prev_tail = tail_holder[0]
+            # Always reset: final batch already emitted everything including any tail
+            prev_tail = None
             self._clean_vram()
 
     def stream_from_tokens(self, text_token_generator, voice="alloy",
@@ -856,6 +857,7 @@ class HiggsTTS:
                 _prev_tail = None
 
             if len(new_audio) > 0:
+
                 yield from _yield_pcm(new_audio)
                 samples_emitted = emit_to
 
@@ -893,6 +895,10 @@ class HiggsTTS:
             # Final flush: emit all remaining samples including holdback zone
             if rows:
                 yield from _emit_batch(is_final=True)
+
+            # Store final tail for inter-segment crossfade (if any remaining)
+            if tail_out is not None:
+                tail_out[0] = _prev_tail
 
             logger.info("Stream done: %d rows, %.1fs total audio",
                         len(rows), samples_emitted / SAMPLE_RATE)
