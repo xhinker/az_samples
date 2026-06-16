@@ -427,11 +427,16 @@ let _streamRingSize = 0;
 const _STREAM_RING_MAX = 24000 * 30;
 
 function _ringPush(samples) {
-    for (let i = 0; i < samples.length; i++) {
-        _streamRingBuffer[_streamRingWrite] = samples[i];
-        _streamRingWrite = (_streamRingWrite + 1) % _STREAM_RING_MAX;
-        _streamRingSize++;
+    const len = samples.length;
+    const half = _STREAM_RING_MAX - _streamRingWrite;
+    if (len <= half) {
+        _streamRingBuffer.set(samples, _streamRingWrite);
+    } else {
+        _streamRingBuffer.set(samples.subarray(0, half), _streamRingWrite);
+        _streamRingBuffer.set(samples.subarray(half), 0);
     }
+    _streamRingWrite = (_streamRingWrite + len) % _STREAM_RING_MAX;
+    _streamRingSize += len;
 }
 
 function _ringPop(count) {
@@ -449,26 +454,29 @@ function _ringPop(count) {
 }
 
 function createPcmStream(ctx) {
-    // Reset ring buffer
     _streamRingWrite = 0;
     _streamRingRead = 0;
     _streamRingSize = 0;
 
-    // Kill any previous processor
     if (_streamProcessor) {
         try { _streamProcessor.disconnect(); } catch(e) {}
+        _streamProcessor = null;
     }
 
+    let started = false;
     const bufferSize = 4096;
-    _streamProcessor = ctx.createScriptProcessor(bufferSize, 1, 1);
 
-    _streamProcessor.onaudioprocess = function(e) {
-        const output = e.outputBuffer.getChannelData(0);
-        const samples = _ringPop(bufferSize);
-        output.set(samples);
-    };
-
-    _streamProcessor.connect(ctx.destination);
+    function ensureStarted() {
+        if (started) return;
+        started = true;
+        _streamProcessor = ctx.createScriptProcessor(bufferSize, 1, 1);
+        _streamProcessor.onaudioprocess = function(e) {
+            const output = e.outputBuffer.getChannelData(0);
+            const samples = _ringPop(bufferSize);
+            output.set(samples);
+        };
+        _streamProcessor.connect(ctx.destination);
+    }
 
     return {
         write(bytes) {
@@ -477,8 +485,10 @@ function createPcmStream(ctx) {
             const float32 = new Float32Array(int16.length);
             for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
             _ringPush(float32);
+            ensureStarted();
         },
         close() {
+            if (!started) return;
             const drainTime = Math.ceil((_streamRingSize / ctx.sampleRate) * 1000) + 500;
             setTimeout(() => {
                 try { _streamProcessor.disconnect(); } catch(e) {}

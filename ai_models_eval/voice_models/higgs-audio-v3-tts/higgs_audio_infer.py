@@ -519,10 +519,17 @@ class HiggsTTS:
                              add_preroll, close_utterance, decode_every):
         """Incremental AR generation with progressive vocoder decode.
 
-        Yields PCM bytes as rows are generated. Uses fixed gain (no per-batch
-        RMS normalization) for consistent volume across yields.
+        Uses a stable margin at the right edge of each batch to avoid
+        vocoder edge artifacts. The margin samples are held back and
+        re-yielded from the next (more stable) decode. Final batch
+        yields everything including the last margin.
+
+        Uses fixed gain throughout for consistent volume — no per-batch
+        RMS normalization jumps.
         """
         N = self.num_codebooks
+        STABLE_MARGIN = 120  # samples held back at right edge per batch (~5ms at 24kHz)
+
         if cfg.seed is not None:
             torch.manual_seed(cfg.seed)
             torch.cuda.manual_seed_all(cfg.seed)
@@ -544,6 +551,16 @@ class HiggsTTS:
         rows = []
         samples_yielded = 0
 
+        def _yield_pcm(data, start, end):
+            """Yield a segment of float32 audio as PCM16LE bytes."""
+            segment = np.clip(data[start:end] * INCREMENTAL_GAIN, -1.0, 1.0)
+            pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
+            off = 0
+            while off < len(pcm):
+                e = min(len(pcm), off + chunk_size // 2)
+                yield struct.pack("<%dh" % (e - off), *pcm[off:e])
+                off = e
+
         with torch.inference_mode():
             embeds = self.model._prefill_embeds(prompt_ids, delayed_ref)
             out = self.model.model(inputs_embeds=embeds, use_cache=True)
@@ -564,20 +581,17 @@ class HiggsTTS:
                     wav = self.model._decode_codes(codes_TN.to(self.model.device))
                     wav_np = wav.numpy().astype(np.float32)
 
-                    if len(wav_np) > samples_yielded:
-                        segment = wav_np[samples_yielded:]
-                        segment = np.clip(segment * INCREMENTAL_GAIN, -1.0, 1.0)
-                        pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
-                        off = 0
-                        while off < len(pcm):
-                            end = min(len(pcm), off + chunk_size // 2)
-                            yield struct.pack("<%dh" % (end - off), *pcm[off:end])
-                            off = end
-                        samples_yielded = len(wav_np)
-                        logger.debug("Yielded %.1fs (step %d, rows %d)",
-                                     samples_yielded / SAMPLE_RATE, step, len(rows))
+                    total = len(wav_np)
+                    if total > samples_yielded:
+                        # Yield new samples minus stable margin (right edge unstable)
+                        new_stable = total - STABLE_MARGIN
+                        if new_stable > samples_yielded:
+                            yield from _yield_pcm(wav_np, samples_yielded, new_stable)
+                            samples_yielded = new_stable
+                            logger.debug("Yielded %.1fs (step %d, rows %d, margin=%d)",
+                                         samples_yielded / SAMPLE_RATE, step, len(rows), STABLE_MARGIN)
 
-                    del delayed_LN, codes_TN, wav, wav_np, segment, pcm
+                    del delayed_LN, codes_TN, wav, wav_np
 
                 step_emb = self.model.audio_embedding(codes.unsqueeze(0)).unsqueeze(1)
                 cpos = torch.tensor([pos], device=self.model.device)
@@ -587,7 +601,7 @@ class HiggsTTS:
                 del logits, codes, step_emb, cpos
                 pos += 1
 
-            # Final decode: yield remaining audio with proper post-processing
+            # Final decode: yield ALL remaining including margin, with post-processing
             if len(rows) >= N and len(rows) > 0:
                 delayed_LN = torch.stack(rows, dim=0)
                 codes_TN = _reverse_delay_pattern(delayed_LN)
@@ -596,17 +610,17 @@ class HiggsTTS:
 
                 if len(wav_np) > samples_yielded:
                     segment = wav_np[samples_yielded:]
-                    # Add guard silence + trim trailing + normalize
                     silence = np.zeros(int(POST_DECODE_SILENCE_SEC * SAMPLE_RATE), dtype=segment.dtype)
                     segment = np.concatenate([silence, segment])
                     segment = _trim_trailing_silence(segment)
-                    segment = _normalize_audio(segment)
+                    # Use same fixed gain as incremental batches — no RMS jump
+                    segment = np.clip(segment * INCREMENTAL_GAIN, -1.0, 1.0)
                     pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
                     off = 0
                     while off < len(pcm):
-                        end = min(len(pcm), off + chunk_size // 2)
-                        yield struct.pack("<%dh" % (end - off), *pcm[off:end])
-                        off = end
+                        e = min(len(pcm), off + chunk_size // 2)
+                        yield struct.pack("<%dh" % (e - off), *pcm[off:e])
+                        off = e
 
             logger.info("Stream done: %d rows, %.1fs total audio",
                         len(rows), samples_yielded / SAMPLE_RATE)
