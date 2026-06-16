@@ -175,6 +175,26 @@ class GenerationConfig:
     seed: int = None
 
 
+class _StreamResult:
+    """Holds PCM generator + tail for inter-segment crossfade.
+
+    Used internally by stream() to pass tail samples between segments
+    without polluting the PCM byte stream.
+    """
+    def __init__(self):
+        self.tail = None
+        self._chunks = []
+
+    def add(self, pcm_bytes):
+        self._chunks.append(pcm_bytes)
+
+    def finalize(self, tail):
+        self.tail = tail
+
+    def chunks(self):
+        return list(self._chunks)
+
+
 class _SamplerState:
     """State machine for the multi-codebook delay sampler.
 
@@ -519,6 +539,9 @@ class HiggsTTS:
         Within each segment, audio is decoded every `decode_every` AR rows
         and yielded with crossfade overlap to prevent clicks at boundaries.
 
+        Between segments, the tail of the previous segment is crossfaded
+        into the head of the next segment for seamless transitions.
+
         Args:
             text_input: Text to synthesize.
             voice: Voice preset name.
@@ -539,14 +562,21 @@ class HiggsTTS:
         if len(segments) > 1:
             logger.info("Streaming %d segments", len(segments))
 
+        # Pass tail between segments for crossfade at boundaries
+        prev_tail = None
         for i, segment in enumerate(segments):
             if len(segments) > 1:
                 logger.info("Streaming segment %d/%d", i+1, len(segments))
             steps = _compute_max_steps(segment) if max_steps is None else max_steps
-            yield from self._stream_incremental(segment, cfg, steps, chunk_size,
+            # Use a mutable container so _stream_incremental can store the tail
+            tail_holder = [None]
+            for pcm in self._stream_incremental(segment, cfg, steps, chunk_size,
                                                  reference_audio, reference_text,
                                                  add_preroll, close_utterance,
-                                                 decode_every)
+                                                 decode_every, prev_tail=prev_tail,
+                                                 tail_out=tail_holder):
+                yield pcm
+            prev_tail = tail_holder[0]
             self._clean_vram()
 
     def stream_from_tokens(self, text_token_generator, voice="alloy",
@@ -693,7 +723,8 @@ class HiggsTTS:
 
     def _stream_incremental(self, text_input, cfg, max_steps, chunk_size,
                              reference_audio, reference_text,
-                             add_preroll, close_utterance, decode_every):
+                             add_preroll, close_utterance, decode_every,
+                             prev_tail=None, tail_out=None):
         """Incremental AR generation with sample-level crossfade for gapless output.
 
         Architecture:
@@ -731,7 +762,8 @@ class HiggsTTS:
         state = _SamplerState(N)
         rows = []
         samples_emitted = 0   # exact sample count already yielded
-        prev_tail = None      # FADE samples from previous batch for crossfade
+        # prev_tail: FADE samples from previous batch/segment for crossfade
+        _prev_tail = prev_tail  # use passed-in tail (from previous segment) or None
 
         def _yield_pcm(segment):
             """Convert a float32 audio segment to PCM16LE bytes and yield."""
@@ -761,7 +793,7 @@ class HiggsTTS:
             Strategy: decode ALL rows each time (full context = most stable samples).
             Track exact sample position to avoid drift. Hold back right edge.
             """
-            nonlocal samples_emitted, prev_tail
+            nonlocal samples_emitted, _prev_tail
 
             if len(rows) < N:
                 return
@@ -784,15 +816,15 @@ class HiggsTTS:
             new_audio = wav_np[samples_emitted:emit_to].copy()
 
             # Crossfade with previous batch's tail to eliminate clicks
-            if prev_tail is not None and len(prev_tail) > 0:
-                new_audio = _crossfade(prev_tail, new_audio, FADE)
+            if _prev_tail is not None and len(_prev_tail) > 0:
+                new_audio = _crossfade(_prev_tail, new_audio, FADE)
 
             # Keep tail for next crossfade (unless this is the final batch)
             if not is_final and len(new_audio) > FADE:
-                prev_tail = new_audio[-FADE:].copy()
+                _prev_tail = new_audio[-FADE:].copy()
                 new_audio = new_audio[:-FADE]   # don't emit the tail yet
             else:
-                prev_tail = None
+                _prev_tail = None
 
             if len(new_audio) > 0:
                 yield from _yield_pcm(new_audio)

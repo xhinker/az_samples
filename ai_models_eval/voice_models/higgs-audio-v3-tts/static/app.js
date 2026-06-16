@@ -18,6 +18,7 @@ let isPaused = false;
 let pauseStartTime = 0;
 let playbackStartTime = 0;
 let abortController = null;
+let currentWriteStream = null;  // reference to active streaming playback
 let streamingChunks = [];
 let streamingStartTime = 0;
 
@@ -316,12 +317,18 @@ async function startStreaming(payload, abortCtrl) {
 
     // Start real-time playback
     const ctx = getAudioContext();
-    const writeStream = createPcmStream(ctx);
+    const ws = createPcmStream(ctx);
+    currentWriteStream = ws;  // track for stop button
 
     try {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            // Check if user pressed Stop
+            if (abortCtrl.signal.aborted) {
+                await reader.cancel();
+                throw new DOMException('Aborted', 'AbortError');
+            }
 
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
@@ -345,7 +352,7 @@ async function startStreaming(payload, abortCtrl) {
                         chunkCount++;
 
                         // Write to audio stream for real-time playback
-                        writeStream.write(bytes);
+                        ws.write(bytes);
 
                         // Update progress and waveform every 5 chunks
                         if (chunkCount % 5 === 0) {
@@ -371,15 +378,21 @@ async function startStreaming(payload, abortCtrl) {
                     } else if (data.type === 'done') {
                         const elapsed = ((Date.now() - streamingStartTime) / 1000).toFixed(1);
                         log(`Stream complete: ${data.total_chunks} chunks, ${data.total_bytes} bytes, ${data.duration_seconds}s (${elapsed}s total)`, 'success');
+                        // Keep play buttons disabled until streaming processor fully drains
+                        // They will be enabled after assembly + by _onStreamPlaybackDone callback
                     }
                 }
             }
         }
     } finally {
-        writeStream.close();
+        ws.close();
+        currentWriteStream = null;
     }
 
     // Assemble full audio for playback/download
+    // Stop streaming playback first to prevent overlap
+    stopPlayback();
+
     const totalLength = pcmData.reduce((sum, c) => sum + c.length, 0);
     if (totalLength === 0) {
         log('Warning: No audio data received from stream', 'warning');
@@ -414,8 +427,19 @@ async function startStreaming(payload, abortCtrl) {
     const wavBlob = pcmToWav(fullPcm.buffer, sampleRate);
     audioElement.src = URL.createObjectURL(wavBlob);
     btnDownload.disabled = false;
-    btnPlay.disabled = false;
-    btnReplay.disabled = false;
+
+    // Enable play buttons only after streaming processor has fully drained
+    // Set up a callback for when the stream processor disconnects
+    window._onStreamPlaybackDone = () => {
+        btnPlay.disabled = false;
+        btnReplay.disabled = false;
+        log('Playback controls ready', 'info');
+    };
+    // If streaming wasn't playing (buffer never filled), enable immediately
+    setTimeout(() => {
+        btnPlay.disabled = false;
+        btnReplay.disabled = false;
+    }, 2000); // Fallback timeout
 }
 
 // --- PCM streaming playback — ring buffer + ScriptProcessorNode, no overlaps ---
@@ -464,10 +488,14 @@ function createPcmStream(ctx) {
     }
 
     let started = false;
+    let closed = false;
     const bufferSize = 4096;
+    const MIN_BUFFER_SAMPLES = 24000; // Don't start until 1s of audio buffered
 
     function ensureStarted() {
         if (started) return;
+        // Only start when we have enough buffered audio to avoid underruns
+        if (_streamRingSize < MIN_BUFFER_SAMPLES) return;
         started = true;
         _streamProcessor = ctx.createScriptProcessor(bufferSize, 1, 1);
         _streamProcessor.onaudioprocess = function(e) {
@@ -476,11 +504,12 @@ function createPcmStream(ctx) {
             output.set(samples);
         };
         _streamProcessor.connect(ctx.destination);
+        log('Playback started (buffered ' + (_streamRingSize / ctx.sampleRate).toFixed(1) + 's)', 'info');
     }
 
     return {
         write(bytes) {
-            if (!bytes || bytes.length === 0) return;
+            if (!bytes || bytes.length === 0 || closed) return;
             const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
             const float32 = new Float32Array(int16.length);
             for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
@@ -488,14 +517,20 @@ function createPcmStream(ctx) {
             ensureStarted();
         },
         close() {
+            closed = true;
             if (!started) return;
-            const drainTime = Math.ceil((_streamRingSize / ctx.sampleRate) * 1000) + 500;
+            // Calculate drain time based on remaining samples
+            const drainTime = Math.ceil((_streamRingSize / ctx.sampleRate) * 1000) + 200;
             setTimeout(() => {
                 try { _streamProcessor.disconnect(); } catch(e) {}
                 _streamProcessor = null;
                 _streamRingSize = 0;
+                started = false;
+                // Signal that streaming playback is fully done
+                if (window._onStreamPlaybackDone) window._onStreamPlaybackDone();
             }, drainTime);
         },
+        isPlaying() { return started && !closed; }
     };
 }
 
@@ -598,9 +633,16 @@ function stopPlayback() {
 }
 
 async function stopGeneration() {
+    // Stop streaming playback immediately (ScriptProcessorNode)
+    if (currentWriteStream) {
+        currentWriteStream.close();
+        currentWriteStream = null;
+    }
+    // Abort the fetch/reader
     if (abortController) {
         abortController.abort();
     }
+    // Stop batch playback (AudioBufferSourceNode)
     stopPlayback();
 }
 
