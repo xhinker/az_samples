@@ -224,15 +224,16 @@ async def audio_speech_stream(request):
         }
         await response.write(f"event: metadata\ndata: {json.dumps(meta)}\n\n".encode())
 
-        # Send audio chunks as SSE
+        # Send audio chunks as SSE (true incremental streaming)
         total_bytes = 0
         chunk_count = 0
         try:
-            for pcm_chunk in tts_engine.stream(
+            for pcm_chunk in tts_engine.stream_incremental(
                 text_input=text_input,
                 voice=voice, temperature=temperature, top_k=top_k, top_p=top_p,
                 reference_audio=delayed_ref, reference_text=reference_text,
                 chunk_size=960,
+                decode_every=50,  # Yield audio every 50 AR rows (~2s)
             ):
                 chunk_data = base64.b64encode(pcm_chunk).decode("ascii")
                 event = {

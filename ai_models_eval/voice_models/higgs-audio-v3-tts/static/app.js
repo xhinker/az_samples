@@ -347,11 +347,26 @@ async function startStreaming(payload, abortCtrl) {
                         // Write to audio stream for real-time playback
                         writeStream.write(bytes);
 
-                        // Update progress visualization every 10 chunks
-                        if (chunkCount % 10 === 0) {
+                        // Update progress and waveform every 5 chunks
+                        if (chunkCount % 5 === 0) {
                             const elapsed = ((Date.now() - streamingStartTime) / 1000).toFixed(1);
                             const duration = (totalBytes / 2 / sampleRate).toFixed(1);
-                            log(`  Chunk ${chunkCount}: ${totalBytes} bytes, ${duration}s audio (${elapsed}s elapsed)`);
+                            statusText.textContent = `Streaming... ${duration}s audio (${elapsed}s elapsed)`;
+                            // Draw progressive waveform
+                            const allData = new Int16Array(totalBytes / 2);
+                            let off = 0;
+                            for (const c of pcmData) {
+                                allData.set(new Int16Array(c.buffer, c.byteOffset, c.byteLength / 2), off);
+                                off += c.byteLength / 2;
+                            }
+                            const floatData = new Float32Array(allData.length);
+                            for (let i = 0; i < allData.length; i++) floatData[i] = allData[i] / 32768;
+                            drawWaveform(floatData, '#3fb950');
+                        }
+                        if (chunkCount % 20 === 0) {
+                            const elapsed = ((Date.now() - streamingStartTime) / 1000).toFixed(1);
+                            const duration = (totalBytes / 2 / sampleRate).toFixed(1);
+                            log(`  ${chunkCount} chunks: ${duration}s audio (${elapsed}s)`, 'info');
                         }
                     } else if (data.type === 'done') {
                         const elapsed = ((Date.now() - streamingStartTime) / 1000).toFixed(1);

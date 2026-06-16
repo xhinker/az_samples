@@ -327,14 +327,56 @@ class HiggsTTS:
     def stream(self, text_input, voice="alloy", chunk_size=200,
                temperature=None, top_k=None, top_p=None, seed=None,
                max_steps=None, reference_audio=None, reference_text=None,
-               add_preroll=True, close_utterance=True):
-        """Streaming synthesis: text -> PCM16LE byte generator.
+               add_preroll=True, close_utterance=True, decode_every=50):
+        """Incremental streaming: yields PCM as AR loop generates rows.
 
-        Yields PCM16LE byte chunks as soon as audio is decoded.
+        Every `decode_every` AR rows, accumulated codes are decoded through
+        the vocoder and yielded as PCM bytes. This means audio starts flowing
+        to the caller while the model is still generating the rest.
 
         Args:
             Same as synthesize(), plus:
             chunk_size: PCM bytes per yield (default 200 = ~4ms audio).
+            decode_every: Yield audio every N rows (default 50 = ~2s).
+
+        Yields:
+            bytes: PCM16LE audio chunks (24kHz, mono).
+        """
+        yield from self.stream_incremental(
+            text_input=text_input, voice=voice, chunk_size=chunk_size,
+            temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
+            max_steps=max_steps, reference_audio=reference_audio,
+            reference_text=reference_text, add_preroll=add_preroll,
+            close_utterance=close_utterance, decode_every=decode_every,
+        )
+
+    def stream_incremental(self, text_input, voice="alloy", chunk_size=960,
+                               temperature=None, top_k=None, top_p=None, seed=None,
+                               max_steps=None, reference_audio=None, reference_text=None,
+                               add_preroll=True, close_utterance=True,
+                               decode_every=50):
+        """True incremental streaming: yields PCM as AR loop generates rows.
+
+        Unlike stream() which generates ALL rows then decodes, this method
+        yields audio chunks progressively during generation. The AR loop
+        runs row-by-row, and every `decode_every` rows, the accumulated
+        codes are decoded through the vocoder and yielded as PCM bytes.
+
+        This enables real-time streaming where the user hears the first
+        words while the model is still generating the rest.
+
+        Args:
+            text_input: Text to synthesize.
+            voice: Voice preset name.
+            chunk_size: PCM bytes per yield.
+            temperature, top_k, top_p, seed: Sampling config.
+            max_steps: AR step cap. None = auto.
+            reference_audio: Pre-encoded delayed_ref tensor.
+            reference_text: Transcript of reference audio.
+            add_preroll: Add prosody pause before first token.
+            close_utterance: Ensure terminal punctuation.
+            decode_every: Decode and yield every N rows (default 50 = ~2s audio).
+                          Lower = less latency but more vocoder overhead.
 
         Yields:
             bytes: PCM16LE audio chunks (24kHz, mono).
@@ -343,20 +385,134 @@ class HiggsTTS:
         if max_steps is None:
             max_steps = _compute_max_steps(text_input)
 
-        rows = self._run_ar_generation(text_input, cfg, max_steps,
-                                        reference_audio, reference_text,
-                                        add_preroll, close_utterance)
+        N = self.num_codebooks
 
-        wav_np = self._decode_rows(rows)
-        pcm = np.clip(wav_np * 32767.0, -32768, 32767).astype(np.int16)
+        # Set seed
+        if cfg.seed is not None:
+            torch.manual_seed(cfg.seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(cfg.seed)
 
-        offset = 0
-        total = len(pcm)
-        while offset < total:
-            end = min(total, offset + chunk_size // 2)
-            yield struct.pack("<%dh" % (end - offset), *pcm[offset:end])
-            offset = end
+        # Reference audio
+        delayed_ref = None
+        if reference_audio is not None:
+            if isinstance(reference_audio, torch.Tensor):
+                delayed_ref = reference_audio
+            else:
+                delayed_ref = self.encode_reference_audio(reference_audio)
 
+        # Build prompt
+        source_text = (_ensure_terminal_punctuation(text_input)
+                       if close_utterance else text_input.strip())
+        generation_text = (_add_generation_preroll(source_text)
+                           if add_preroll else source_text)
+
+        num_ref_tokens = 0 if delayed_ref is None else delayed_ref.shape[0]
+        prompt_ids_list = self.model._build_prompt_ids(
+            self.tokenizer, generation_text,
+            num_ref_tokens=num_ref_tokens, reference_text=reference_text
+        )
+
+        state = _SamplerState(N)
+        rows = []  # Accumulated codebook rows [L, N]
+        samples_yielded = 0  # Total PCM samples already sent to client
+
+        with torch.inference_mode():
+            inputs_embeds = self.model._prefill_embeds(prompt_ids_list, delayed_ref)
+            out = self.model.model(inputs_embeds=inputs_embeds, use_cache=True)
+            past = out.past_key_values
+            hidden_last = out.last_hidden_state[:, -1, :]
+            position = inputs_embeds.shape[1]
+
+            for step in range(max_steps):
+                logits_NV = self.model.audio_head(hidden_last).to(torch.float32)[0]
+                codes_N = _sampler_step(logits_NV, state, cfg.temperature,
+                                         cfg.top_p, cfg.top_k)
+
+                if state.generation_done:
+                    print(f"  [HiggsTTS] EOC at step {step}")
+                    break
+
+                rows.append(codes_N.cpu())
+
+                # --- Incremental decode: every decode_every rows ---
+                if len(rows) >= N + decode_every and (len(rows) - N) % decode_every == 0:
+                    delayed_LN = torch.stack(rows, dim=0)  # [L, N]
+                    codes_TN = _reverse_delay_pattern(delayed_LN)  # [T, N]
+                    wav = self.model._decode_codes(codes_TN.to(self.model.device))
+                    wav_np = wav.numpy().astype(np.float32)
+
+                    # Only yield NEW samples (after last yield point)
+                    new_start = samples_yielded
+                    new_end = len(wav_np)
+                    if new_end > new_start:
+                        segment = wav_np[new_start:new_end]
+
+                        # Normalize volume
+                        rms = float(np.sqrt(np.mean(segment ** 2)))
+                        if rms > 0:
+                            gain = min(0.2 / rms, 5.0)
+                            segment = np.clip(segment * gain, -1.0, 1.0)
+
+                        pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
+                        offset = 0
+                        total = len(pcm)
+                        while offset < total:
+                            end = min(total, offset + chunk_size // 2)
+                            yield struct.pack("<%dh" % (end - offset), *pcm[offset:end])
+                            offset = end
+
+                        samples_yielded = new_end
+                        print(f"  [HiggsTTS] Stream: {new_end/SAMPLE_RATE:.1f}s audio yielded "
+                              f"(step {step}, rows {len(rows)})")
+
+                    # Free intermediates
+                    del delayed_LN, codes_TN, wav, wav_np, segment, pcm
+
+                # AR next step
+                step_embed = self.model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
+                cache_pos = torch.tensor([position], device=self.model.device)
+                out = self.model.model(
+                    inputs_embeds=step_embed.to(inputs_embeds.dtype),
+                    past_key_values=past, use_cache=True, cache_position=cache_pos,
+                )
+                past = out.past_key_values
+                hidden_last = out.last_hidden_state[:, -1, :]
+
+                del logits_NV, codes_N, step_embed, cache_pos
+                position += 1
+
+        # --- Final decode: yield remaining audio ---
+        if len(rows) >= N:
+            delayed_LN = torch.stack(rows, dim=0)
+            codes_TN = _reverse_delay_pattern(delayed_LN)
+            wav = self.model._decode_codes(codes_TN.to(self.model.device))
+            wav_np = wav.numpy().astype(np.float32)
+
+            if len(wav_np) > samples_yielded:
+                segment = wav_np[samples_yielded:]
+
+                # Prepend guard silence + trim trailing
+                silence_samples = int(POST_DECODE_SILENCE_SEC * SAMPLE_RATE)
+                silence = np.zeros(silence_samples, dtype=segment.dtype)
+                segment = np.concatenate([silence, segment])
+                segment = _trim_trailing_silence(segment)
+
+                rms = float(np.sqrt(np.mean(segment ** 2)))
+                if rms > 0:
+                    gain = min(0.2 / rms, 5.0)
+                    segment = np.clip(segment * gain, -1.0, 1.0)
+
+                pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
+                offset = 0
+                total = len(pcm)
+                while offset < total:
+                    end = min(total, offset + chunk_size // 2)
+                    yield struct.pack("<%dh" % (end - offset), *pcm[offset:end])
+                    offset = end
+
+        total_rows = len(rows)
+        print(f"  [HiggsTTS] Done: {total_rows} rows generated")
         self._clean_vram()
 
     def stream_from_tokens(self, text_token_generator, voice="alloy",
