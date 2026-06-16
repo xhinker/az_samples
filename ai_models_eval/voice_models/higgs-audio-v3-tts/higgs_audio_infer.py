@@ -4,22 +4,6 @@
 Production-ready text-to-speech for bosonai/higgs-audio-v3-tts-4b.
 Supports batch synthesis, incremental streaming, LLM token pipeline,
 bilingual text (EN/CN), voice cloning, and automatic long-text splitting.
-
-Usage:
-    from higgs_audio_infer import HiggsTTS
-
-    tts = HiggsTTS(model_path="/path/to/model", device="cuda:0")
-
-    # Batch: auto-splits long text, returns single WAV
-    path, dur = tts.synthesize("A very long story in English or 中文...")
-
-    # Streaming: yields PCM bytes as AR loop generates (incremental)
-    for pcm in tts.stream("Hello world."):
-        player.write(pcm)
-
-    # LLM pipeline: token generator -> PCM stream
-    for pcm in tts.stream_from_tokens(llm_generator):
-        player.write(pcm)
 """
 
 import os
@@ -39,25 +23,22 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
-# --- Constants ---
 BOC_ID = 1024
 EOC_ID = 1025
 SAMPLE_RATE = 24000
 POST_DECODE_SILENCE_SEC = 0.03
 DEFAULT_PREROLL_TOKEN = "<|prosody:pause|>"
-TARGET_RMS = 0.2          # ~-14 dBFS for final output
-MAX_GAIN = 5.0            # Cap gain to avoid noise amplification
-INCREMENTAL_GAIN = 1.5    # Fixed gain for incremental streaming (no per-chunk RMS target)
-STREAM_OVERLAP_TOKENS = 8
-STREAM_HOLDBACK_TOKENS = 4
-CODEC_SAMPLES_PER_FRAME = SAMPLE_RATE // 75
+TARGET_RMS = 0.2
+MAX_GAIN = 5.0
+INCREMENTAL_GAIN = 1.5
 
-# Text splitting thresholds
-SPLIT_THRESHOLD_CHARS = 120   # Split if non-space chars exceed this
-SPLIT_TARGET_SECONDS = 12.0   # Target audio duration per chunk
-SPLIT_MAX_WORDS = 28          # Hard cap on words per chunk
+SPLIT_THRESHOLD_CHARS = 120
+SPLIT_TARGET_SECONDS = 12.0
+SPLIT_MAX_WORDS = 28
 
-# Regex patterns
+STREAM_CROSSFADE_SAMPLES = 240
+STREAM_HOLDBACK_SAMPLES = 120
+
 CONTROL_TOKEN_RE = re.compile(r"<\|[^|]+:[^|]+?\|>")
 LEADING_CONTROL_TOKEN_RE = re.compile(r"\s*(<\|[^|]+:[^|]+?\|>)")
 TERMINAL_PUNCT_CHARS = ".!?。！？"
@@ -65,7 +46,6 @@ WEAK_PUNCT_CHARS = ",;，；、:："
 CLOSING_QUOTE_CHARS = "\"'\"'）)]》」』"
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
-# Voice presets
 VOICE_PRESETS = {
     "alloy":  {"temperature": 0.75, "top_k": 50, "top_p": 0.95, "seed": 1234},
     "echo":   {"temperature": 0.80, "top_k": 50, "top_p": 0.95, "seed": 1235},
@@ -76,10 +56,7 @@ VOICE_PRESETS = {
 }
 
 
-# --- Text splitting (from tts_utils.py, inlined for self-containment) ---
-
 def _estimate_text_seconds(piece):
-    """Estimate spoken duration for a text piece (EN/CN aware)."""
     normalized = " ".join(piece.strip().split())
     if not normalized:
         return 0.0
@@ -92,23 +69,13 @@ def _estimate_text_seconds(piece):
 
 
 def _needs_split(text):
-    """Check if text is long enough to warrant splitting."""
     non_space = len(text.replace(" ", ""))
     return non_space > SPLIT_THRESHOLD_CHARS or _estimate_text_seconds(text) > SPLIT_TARGET_SECONDS
 
 
 def _split_text(text):
-    """Split long text into TTS-friendly chunks (EN/CN bilingual).
-
-    Uses the same algorithm as tts_utils.split_text_for_reanchor:
-    sentence-boundary splitting with duration-based merging.
-
-    Returns list of text chunks, each suitable for a single AR generation.
-    """
     if not _needs_split(text):
         return [text.strip()]
-
-    # Try importing from tts_utils first (for consistency with existing code)
     try:
         voice_models_dir = Path(__file__).resolve().parent.parent
         import sys
@@ -121,12 +88,9 @@ def _split_text(text):
             return segments
     except ImportError:
         logger.debug("tts_utils not available, using inline splitting")
-
-    # Inline fallback: sentence-based splitting with merging
     clean = " ".join(text.strip().split())
     sentence_re = re.compile(r"[^.!?。！？]+(?:[.!?。！？]+)?")
     sentences = [m.group(0).strip() for m in sentence_re.finditer(clean) if m.group(0).strip()]
-
     segments = []
     current = ""
     for sent in sentences:
@@ -139,11 +103,8 @@ def _split_text(text):
             current = candidate
     if current:
         segments.append(current)
-
     return [s.strip() for s in segments if s.strip()] or [clean.strip()]
 
-
-# --- Sampler ---
 
 @dataclass
 class GenerationConfig:
@@ -155,7 +116,6 @@ class GenerationConfig:
 
 class _SamplerState:
     __slots__ = ["num_codebooks", "delay_count", "eoc_countdown", "generation_done"]
-
     def __init__(self, num_codebooks):
         self.num_codebooks = num_codebooks
         self.delay_count = 0
@@ -202,8 +162,6 @@ def _sampler_step(logits_NV, state, temperature, top_p, top_k):
             state.eoc_countdown = N - 2
     return codes_N
 
-
-# --- Helpers ---
 
 def _reverse_delay_pattern(delayed_LN):
     L, Nc = delayed_LN.shape
@@ -275,7 +233,6 @@ def _compute_max_steps(text_input):
 
 
 def _normalize_audio(wav_np):
-    """Normalize audio to target RMS with gain cap."""
     rms = float(np.sqrt(np.mean(wav_np ** 2)))
     if rms > 0:
         gain = min(TARGET_RMS / rms, MAX_GAIN)
@@ -283,37 +240,22 @@ def _normalize_audio(wav_np):
     return wav_np
 
 
-# --- Main class ---
-
 class HiggsTTS:
-    """Higgs Audio v3 TTS inference engine.
-
-    Args:
-        model_path: Path to higgs-audio-v3-tts-4b model directory.
-        device: GPU device string, e.g. "cuda:0".
-        dtype: Model precision (bfloat16 or float16).
-    """
-
     def __init__(self, model_path, device="cuda:0", dtype=torch.bfloat16):
         os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
         self.device = device
         self.dtype = dtype
         self._device_idx = int(str(device).split(":")[-1]) if ":" in str(device) else 0
-
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path, trust_remote_code=True, dtype=dtype, device_map=device,
         ).eval()
         self.model.requires_grad_(False)
         self.num_codebooks = self.model.num_codebooks
-
         logger.info("HiggsTTS loaded: device=%s, codebooks=%d, dtype=%s",
                      self.model.device, self.num_codebooks, dtype)
 
-    # ---- Public API ----
-
     def encode_reference_audio(self, reference_audio, reference_sr=None):
-        """Encode reference WAV for voice cloning. Returns delayed_ref tensor."""
         if isinstance(reference_audio, str):
             with wave.open(reference_audio, "rb") as wf:
                 ref_sr = wf.getframerate()
@@ -327,7 +269,6 @@ class HiggsTTS:
         else:
             ref_tensor = reference_audio.float()
             ref_sr = reference_sr or SAMPLE_RATE
-
         with torch.inference_mode():
             codes_TN = self.model._encode_reference(ref_tensor, ref_sr)
         delayed_ref = _apply_delay_pattern(codes_TN.cpu())
@@ -340,40 +281,27 @@ class HiggsTTS:
                    temperature=None, top_k=None, top_p=None, seed=None,
                    max_steps=None, reference_audio=None, reference_text=None,
                    add_preroll=True, close_utterance=True):
-        """Batch synthesis: text -> WAV file. Auto-splits long text.
-
-        Returns:
-            (wav_path, duration_seconds) tuple.
-        """
         cfg = self._resolve_config(voice, temperature, top_k, top_p, seed)
         segments = _split_text(text_input)
-
         if len(segments) > 1:
             logger.info("Long text split into %d segments", len(segments))
-
-        # Generate each segment
         chunk_wavs = []
         for i, segment in enumerate(segments):
             if len(segments) > 1:
                 logger.info("Synthesizing segment %d/%d: %s", i+1, len(segments),
                             segment[:60].replace('\n', ' '))
-
             steps = _compute_max_steps(segment) if max_steps is None else max_steps
             rows = self._run_ar_generation(segment, cfg, steps, reference_audio,
                                             reference_text, add_preroll, close_utterance)
             wav_np = self._decode_rows(rows)
             chunk_wavs.append(wav_np)
             self._clean_vram()
-
-        # Concatenate all segments
         combined = np.concatenate(chunk_wavs)
         combined = _normalize_audio(combined)
-
         if output_path is None:
             import time
             ts = time.strftime("%Y%m%d_%H%M%S")
             output_path = f"/tmp/higgs_{ts}.wav"
-
         self._write_wav(combined, output_path)
         duration = len(combined) / SAMPLE_RATE
         logger.info("Saved %s (%.1fs, %d segment(s))", output_path, duration, len(segments))
@@ -383,24 +311,13 @@ class HiggsTTS:
                temperature=None, top_k=None, top_p=None, seed=None,
                max_steps=None, reference_audio=None, reference_text=None,
                add_preroll=True, close_utterance=True, decode_every=50):
-        """Incremental streaming: text -> PCM16LE byte generator.
-
-        Auto-splits long text into segments. For each segment, yields PCM
-        bytes progressively as the AR loop generates codebook rows.
-
-        Yields:
-            bytes: PCM16LE audio chunks (24kHz, mono).
-        """
         cfg = self._resolve_config(voice, temperature, top_k, top_p, seed)
         segments = _split_text(text_input)
-
         if len(segments) > 1:
             logger.info("Streaming %d segments", len(segments))
-
         for i, segment in enumerate(segments):
             if len(segments) > 1:
                 logger.info("Streaming segment %d/%d", i+1, len(segments))
-
             steps = _compute_max_steps(segment) if max_steps is None else max_steps
             yield from self._stream_incremental(segment, cfg, steps, chunk_size,
                                                  reference_audio, reference_text,
@@ -412,21 +329,9 @@ class HiggsTTS:
                            chunk_size=200, temperature=None, top_k=None,
                            top_p=None, seed=None, reference_audio=None,
                            reference_text=None, max_buffer_sec=5.0, decode_every=50):
-        """LLM token pipeline: text tokens -> PCM audio stream.
-
-        Buffers tokens at sentence boundaries, synthesizes each utterance
-        with incremental streaming.
-
-        Yields:
-            bytes: PCM16LE audio chunks (24kHz, mono).
-        """
         cfg = self._resolve_config(voice, temperature, top_k, top_p, seed)
         sentence_re = re.compile(r'([.!?。\u203f！\u203f]+[\s"]*)')
         buffer = ""
-
-        def estimate_secs(text):
-            return _estimate_text_seconds(text)
-
         def flush(text):
             if not text.strip():
                 return
@@ -437,11 +342,10 @@ class HiggsTTS:
                                                  reference_audio, reference_text,
                                                  True, True, decode_every)
             self._clean_vram()
-
         try:
             for token in text_token_generator:
                 buffer += token
-                if estimate_secs(buffer) >= max_buffer_sec and buffer.strip():
+                if _estimate_text_seconds(buffer) >= max_buffer_sec and buffer.strip():
                     yield from flush(buffer)
                     buffer = ""
                 match = sentence_re.search(buffer)
@@ -453,8 +357,6 @@ class HiggsTTS:
             if buffer.strip():
                 logger.info("Pipeline flushing: %s", buffer[:80])
                 yield from flush(buffer)
-
-    # ---- Internal methods ----
 
     def _resolve_config(self, voice, temperature, top_k, top_p, seed):
         preset = VOICE_PRESETS.get(voice, VOICE_PRESETS["alloy"])
@@ -468,33 +370,26 @@ class HiggsTTS:
     def _run_ar_generation(self, text_input, cfg, max_steps,
                             reference_audio, reference_text,
                             add_preroll, close_utterance):
-        """Run full AR generation loop. Returns list of codebook rows."""
         N = self.num_codebooks
         if cfg.seed is not None:
             torch.manual_seed(cfg.seed)
             torch.cuda.manual_seed_all(cfg.seed)
-
         delayed_ref = None
         if reference_audio is not None:
             delayed_ref = (reference_audio if isinstance(reference_audio, torch.Tensor)
                           else self.encode_reference_audio(reference_audio))
-
         source = (_ensure_terminal_punctuation(text_input) if close_utterance
                   else text_input.strip())
         gen_text = (_add_generation_preroll(source) if add_preroll else source)
-
         num_ref = 0 if delayed_ref is None else delayed_ref.shape[0]
         prompt_ids = self.model._build_prompt_ids(
             self.tokenizer, gen_text, num_ref_tokens=num_ref, reference_text=reference_text)
-
         state = _SamplerState(N)
         rows = []
-
         with torch.inference_mode():
             embeds = self.model._prefill_embeds(prompt_ids, delayed_ref)
             out = self.model.model(inputs_embeds=embeds, use_cache=True)
             past, hidden, pos = out.past_key_values, out.last_hidden_state[:, -1, :], embeds.shape[1]
-
             for step in range(max_steps):
                 logits = self.model.audio_head(hidden).to(torch.float32)[0]
                 codes = _sampler_step(logits, state, cfg.temperature, cfg.top_p, cfg.top_k)
@@ -509,7 +404,6 @@ class HiggsTTS:
                 past, hidden = out.past_key_values, out.last_hidden_state[:, -1, :]
                 del logits, codes, step_emb, cpos
                 pos += 1
-
         if len(rows) >= max_steps - N:
             logger.warning("Hit max_steps=%d cap for: %s", max_steps, text_input[:80])
         if len(rows) < N:
@@ -520,19 +414,10 @@ class HiggsTTS:
     def _stream_incremental(self, text_input, cfg, max_steps, chunk_size,
                              reference_audio, reference_text,
                              add_preroll, close_utterance, decode_every):
-        """Incremental AR generation with progressive vocoder decode.
-
-        Uses codec-frame overlap and holdback at each decode boundary. The
-        vocoder is not sample-local at the right edge, so slicing by raw sample
-        offsets can expose unstable decode edges as clicks or small noise bursts.
-        Re-decoding a short token overlap and trimming by codec frame keeps the
-        emitted PCM continuous.
-
-        Uses fixed gain throughout for consistent volume — no per-batch
-        RMS normalization jumps.
-        """
+        """Incremental AR generation with sample-level crossfade for gapless output."""
         N = self.num_codebooks
-        samples_per_frame = CODEC_SAMPLES_PER_FRAME
+        FADE = STREAM_CROSSFADE_SAMPLES
+        HOLD = STREAM_HOLDBACK_SAMPLES
 
         if cfg.seed is not None:
             torch.manual_seed(cfg.seed)
@@ -553,75 +438,53 @@ class HiggsTTS:
 
         state = _SamplerState(N)
         rows = []
-        emitted_raw_frames = 0
-
-        def _codec_samples_per_frame(wav_len, raw_frames):
-            codec = getattr(self.model, "_audio_codec", None)
-            codec_model = getattr(codec, "model", None)
-            codec_config = getattr(codec_model, "config", None)
-            hop_length = getattr(codec_config, "hop_length", None)
-            if hop_length is not None:
-                try:
-                    hop_length = int(hop_length)
-                    if hop_length > 0:
-                        return hop_length
-                except (TypeError, ValueError):
-                    pass
-            if raw_frames > 0 and wav_len > 0:
-                return max(1, int(round(wav_len / raw_frames)))
-            return CODEC_SAMPLES_PER_FRAME
+        samples_emitted = 0
+        prev_tail = None
 
         def _yield_pcm(segment):
-            """Yield a float32 audio segment as PCM16LE bytes."""
             if len(segment) == 0:
                 return
-            segment = np.clip(segment * INCREMENTAL_GAIN, -1.0, 1.0)
-            pcm = np.clip(segment * 32767.0, -32768, 32767).astype(np.int16)
+            seg = np.clip(segment * INCREMENTAL_GAIN, -1.0, 1.0)
+            pcm = np.clip(seg * 32767.0, -32768, 32767).astype(np.int16)
             off = 0
             while off < len(pcm):
                 e = min(len(pcm), off + chunk_size // 2)
                 yield struct.pack("<%dh" % (e - off), *pcm[off:e])
                 off = e
 
-        def _decode_delta(is_final=False):
-            """Decode and emit new codec frames with overlap/holdback."""
-            nonlocal emitted_raw_frames, samples_per_frame
+        def _crossfade(old_tail, new_head, fade_len):
+            fl = min(fade_len, len(old_tail), len(new_head))
+            if fl <= 0:
+                return np.concatenate([old_tail, new_head])
+            fade_out = np.linspace(1.0, 0.0, fl)
+            fade_in = np.linspace(0.0, 1.0, fl)
+            blended = old_tail[-fl:] * fade_out + new_head[:fl] * fade_in
+            return np.concatenate([old_tail[:-fl], blended, new_head[fl:]])
 
-            delayed_count = len(rows)
-            if delayed_count < N:
+        def _emit_batch(is_final=False):
+            nonlocal samples_emitted, prev_tail
+            if len(rows) < N:
                 return
-
-            raw_total = delayed_count - N + 1
-            emit_until_raw = raw_total
-            if not is_final:
-                emit_until_raw = max(0, raw_total - STREAM_HOLDBACK_TOKENS)
-
-            if emit_until_raw <= emitted_raw_frames:
-                return
-
-            window_start_raw = max(0, emitted_raw_frames - STREAM_OVERLAP_TOKENS)
-            rows_end = emit_until_raw + N - 1
-            delayed_LN = torch.stack(rows[window_start_raw:rows_end], dim=0)
+            delayed_LN = torch.stack(rows, dim=0)
             codes_TN = _reverse_delay_pattern(delayed_LN)
             wav = self.model._decode_codes(codes_TN.to(self.model.device))
             wav_np = wav.numpy().astype(np.float32)
-
-            decoded_raw_frames = emit_until_raw - window_start_raw
-            samples_per_frame = _codec_samples_per_frame(len(wav_np), decoded_raw_frames)
-            trim_frames = emitted_raw_frames - window_start_raw
-            trim_samples = min(trim_frames * samples_per_frame, len(wav_np))
-
-            if is_final:
-                segment = wav_np[trim_samples:]
-                segment = _trim_trailing_silence(segment)
+            total_samples = len(wav_np)
+            if total_samples <= samples_emitted:
+                del delayed_LN, codes_TN, wav, wav_np
+                return
+            emit_to = total_samples if is_final else max(samples_emitted + 1, total_samples - HOLD)
+            new_audio = wav_np[samples_emitted:emit_to].copy()
+            if prev_tail is not None and len(prev_tail) > 0:
+                new_audio = _crossfade(prev_tail, new_audio, FADE)
+            if not is_final and len(new_audio) > FADE:
+                prev_tail = new_audio[-FADE:].copy()
+                new_audio = new_audio[:-FADE]
             else:
-                new_frames = emit_until_raw - emitted_raw_frames
-                emit_samples = new_frames * samples_per_frame
-                segment = wav_np[trim_samples:trim_samples + emit_samples]
-
-            emitted_raw_frames = emit_until_raw
-            yield from _yield_pcm(segment)
-
+                prev_tail = None
+            if len(new_audio) > 0:
+                yield from _yield_pcm(new_audio)
+                samples_emitted = emit_to
             del delayed_LN, codes_TN, wav, wav_np
 
         with torch.inference_mode():
@@ -636,14 +499,10 @@ class HiggsTTS:
                     logger.debug("EOC at step %d", step)
                     break
                 rows.append(codes.cpu())
-
-                # Incremental decode every decode_every rows
                 if len(rows) >= N + decode_every and (len(rows) - N) % decode_every == 0:
-                    yield from _decode_delta(is_final=False)
-                    logger.debug("Yielded %.1fs (step %d, rows %d, holdback=%d frames)",
-                                 emitted_raw_frames * samples_per_frame / SAMPLE_RATE,
-                                 step, len(rows), STREAM_HOLDBACK_TOKENS)
-
+                    yield from _emit_batch(is_final=False)
+                    logger.debug("Emitted %.1fs (step %d, rows %d)",
+                                 samples_emitted / SAMPLE_RATE, step, len(rows))
                 step_emb = self.model.audio_embedding(codes.unsqueeze(0)).unsqueeze(1)
                 cpos = torch.tensor([pos], device=self.model.device)
                 out = self.model.model(inputs_embeds=step_emb.to(embeds.dtype),
@@ -652,23 +511,18 @@ class HiggsTTS:
                 del logits, codes, step_emb, cpos
                 pos += 1
 
-            # Final decode: flush held-back codec frames. Do not prepend silence
-            # here; that would create an audible discontinuity after earlier
-            # streamed samples.
             if rows:
-                yield from _decode_delta(is_final=True)
+                yield from _emit_batch(is_final=True)
 
             logger.info("Stream done: %d rows, %.1fs total audio",
-                        len(rows), emitted_raw_frames * samples_per_frame / SAMPLE_RATE)
+                        len(rows), samples_emitted / SAMPLE_RATE)
 
     def _decode_rows(self, rows):
-        """Decode codebook rows -> processed numpy audio (normalized)."""
         with torch.inference_mode():
             delayed_LN = torch.stack(rows, dim=0)
             codes_TN = _reverse_delay_pattern(delayed_LN)
             wav = self.model._decode_codes(codes_TN.to(self.model.device))
             wav_np = wav.numpy().astype(np.float32)
-
         silence = np.zeros(int(POST_DECODE_SILENCE_SEC * SAMPLE_RATE), dtype=wav_np.dtype)
         wav_np = np.concatenate([silence, wav_np])
         wav_np = _trim_trailing_silence(wav_np)
