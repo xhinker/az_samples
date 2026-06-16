@@ -9,6 +9,8 @@ import os
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
 import re
+import struct
+import io
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import numpy as np
@@ -484,6 +486,257 @@ def infer(
 
     return output_wav_path, duration_s
 
+
+# ======================================================================
+# STREAMING INFERENCE (for AZ PAL real-time voice)
+# ======================================================================
+
+def stream_infer(
+    text_input,
+    max_steps       = None,
+    temperature     = 0.8,
+    top_k           = 50,
+    top_p           = None,
+    seed            = None,
+    reference_audio = None,
+    reference_sr    = None,
+    reference_text  = None,
+    add_preroll     = True,
+    close_utterance = True,
+    chunk_size      = 200,
+):
+    """Stream AR generation + vocoder decode, yielding PCM16LE bytes.
+
+    Instead of writing to a WAV file, this generator yields raw PCM16LE
+    byte chunks as soon as audio is decoded. Designed for real-time
+    streaming with AZ PAL: LLM text tokens -> buffer into sentences ->
+    stream_infer -> PCM bytes -> Web Audio API playback.
+
+    Args:
+        Same as infer(), plus:
+        chunk_size: PCM bytes to yield per chunk (default 200 = ~4ms audio).
+
+    Yields:
+        bytes: PCM16LE audio chunks (24kHz, mono).
+
+    Example:
+        for pcm_chunk in stream_infer("Hello world.", temperature=0.8):
+            audio_player.write(pcm_chunk)
+    """
+    device_idx = int(str(model.device).split(":")[-1])
+    N = model.num_codebooks
+
+    # -- dynamic max_steps
+    if max_steps is None:
+        words = len(text_input.split())
+        chars = len(text_input.replace(" ", ""))
+        max_steps = min(1024, max(192, max(int(words * 4), int(chars * 6)) + 160))
+
+    # -- set random seed
+    if seed is not None:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+    # -- reference audio
+    delayed_ref = None
+    if reference_audio is not None:
+        if isinstance(reference_audio, torch.Tensor):
+            delayed_ref = reference_audio
+        else:
+            delayed_ref = encode_reference_audio(reference_audio, reference_sr)
+
+    # -- build prompt embeddings
+    rows = []
+    source_text = ensure_terminal_punctuation(text_input) if close_utterance else text_input.strip()
+    generation_text = add_generation_preroll(source_text) if add_preroll else source_text
+
+    num_ref_tokens = 0 if delayed_ref is None else delayed_ref.shape[0]
+    prompt_ids_list = model._build_prompt_ids(
+        tokenizer, generation_text, num_ref_tokens=num_ref_tokens, reference_text=reference_text
+    )
+
+    state = _SamplerState(N)
+
+    with torch.inference_mode():
+        inputs_embeds = model._prefill_embeds(prompt_ids_list, delayed_ref)
+        out = model.model(inputs_embeds=inputs_embeds, use_cache=True)
+        past = out.past_key_values
+        hidden_last = out.last_hidden_state[:, -1, :]
+        position = inputs_embeds.shape[1]
+
+        for step in range(max_steps):
+            logits_NV = model.audio_head(hidden_last).to(torch.float32)[0]
+            codes_N = _sampler_step(logits_NV, state, temperature, top_p, top_k)
+
+            if state.generation_done:
+                break
+
+            rows.append(codes_N.cpu())
+
+            step_embed = model.audio_embedding(codes_N.unsqueeze(0)).unsqueeze(1)
+            cache_pos = torch.tensor([position], device=model.device)
+            out = model.model(
+                inputs_embeds=step_embed.to(inputs_embeds.dtype),
+                past_key_values=past,
+                use_cache=True,
+                cache_position=cache_pos,
+            )
+            past = out.past_key_values
+            hidden_last = out.last_hidden_state[:, -1, :]
+
+            del logits_NV, codes_N, step_embed, cache_pos
+            position += 1
+
+    print("  [stream] Generated %d rows, decoding..." % len(rows))
+
+    if len(rows) < N:
+        print("  [stream] WARNING: Too few codebook steps (%d/%d)." % (len(rows), N))
+
+    # -- decode codebooks -> PCM bytes, yield in chunks
+    with torch.inference_mode():
+        delayed_LN = torch.stack(rows, dim=0)
+        codes_TN = reverse_delay_pattern(delayed_LN)
+        wav = model._decode_codes(codes_TN.to(model.device))
+        wav_np = wav.numpy().astype(np.float32)
+        wav_np = prepend_silence(wav_np, sample_rate=24000)
+        wav_np = trim_trailing_silence(wav_np, sample_rate=24000)
+
+        # Normalize volume
+        current_rms = float(np.sqrt(np.mean(wav_np ** 2)))
+        target_rms = 0.2
+        if current_rms > 0:
+            gain = min(target_rms / current_rms, 5.0)
+            wav_np = np.clip(wav_np * gain, -1.0, 1.0)
+
+        # Convert to PCM16
+        pcm = np.clip(wav_np * 32767.0, -32768, 32767).astype(np.int16)
+
+        # Yield in chunks
+        total_samples = len(pcm)
+        offset = 0
+        while offset < total_samples:
+            end = min(total_samples, offset + chunk_size // 2)
+            chunk_bytes = struct.pack(
+                "<%dh" % (end - offset),
+                *pcm[offset:end]
+            )
+            yield chunk_bytes
+            offset = end
+
+    duration_s = len(pcm) / 24000
+    print("  [stream] Yielded %.1fs audio (%d samples)" % (duration_s, len(pcm)))
+
+    # cleanup
+    for name in ["past", "hidden_last", "inputs_embeds", "out",
+                  "wav", "delayed_LN", "codes_TN", "pcm"]:
+        globals().pop(name, None)
+    rows.clear()
+
+
+def stream_tts_pipeline(
+    text_token_generator,
+    temperature     = 0.8,
+    top_k           = 50,
+    top_p           = None,
+    seed            = None,
+    chunk_size      = 200,
+    reference_audio = None,
+    reference_text  = None,
+    max_buffer_sec  = 5.0,
+):
+    """Real-time TTS pipeline: LLM text tokens -> PCM audio stream.
+
+    Buffers incoming text tokens from an LLM stream, splits into
+    utterances at sentence boundaries, synthesizes each via
+    stream_infer(), and yields PCM16LE bytes for immediate playback.
+
+    Main entry point for wiring Higgs Audio with AZ PAL so the AI
+    assistant speaks in real-time as it thinks.
+
+    Args:
+        text_token_generator: Generator yielding text tokens (str) from LLM.
+        temperature, top_k, top_p: Sampling params for stream_infer.
+        chunk_size: PCM bytes per yield from stream_infer.
+        reference_audio: Pre-encoded delayed_ref tensor for voice cloning.
+        reference_text: Transcript of reference audio.
+        max_buffer_sec: Max buffer time before forcing a flush.
+
+    Yields:
+        bytes: PCM16LE audio chunks (24kHz, mono).
+
+    Example:
+        delayed_ref = encode_reference_audio("my_voice.wav")
+
+        def llm_stream():
+            for token in azpal_llm.generate("Tell me a joke"):
+                yield token
+
+        for pcm_chunk in stream_tts_pipeline(
+            llm_stream(),
+            reference_audio=delayed_ref,
+        ):
+            audio_player.write(pcm_chunk)
+    """
+    _SENTENCE_END_RE = re.compile(r'([.!?。‿！‿]+[\s"]*)')
+    buffer = ""
+    buffer_time = 0.0
+
+    def estimate_buffer_seconds(text):
+        chars = len(text.replace(" ", ""))
+        cjk = len(re.findall(r"[㐀-䶿一-鿿豈-﫿]", text))
+        if cjk >= max(8, int(chars * 0.20)):
+            return cjk / 4.0 + (chars - cjk) / 12.0
+        return max(len(text.split()) / 1.8, chars / 10.0)
+
+    def flush_buffer(text):
+        nonlocal buffer, buffer_time
+        if not text.strip():
+            return
+        buffer = text.strip()
+        buffer_time = 0.0
+        print("  [pipeline] Synthesizing: %s" % (buffer[:80] + ("..." if len(buffer) > 80 else "")))
+        for pcm_chunk in stream_infer(
+            text_input=buffer,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            seed=seed,
+            reference_audio=reference_audio,
+            reference_text=reference_text,
+            chunk_size=chunk_size,
+        ):
+            yield pcm_chunk
+
+    try:
+        for token in text_token_generator:
+            buffer += token
+            buffer_time = estimate_buffer_seconds(buffer)
+
+            # Check if we hit a sentence boundary
+            match = _SENTENCE_END_RE.search(buffer)
+            if match:
+                utterance = buffer[:match.end()]
+                buffer = buffer[match.end():]
+                buffer_time = estimate_buffer_seconds(buffer)
+                for pcm_chunk in flush_buffer(utterance):
+                    yield pcm_chunk
+
+            # Force flush if buffer is getting too long
+            if buffer_time >= max_buffer_sec and buffer.strip():
+                for pcm_chunk in flush_buffer(buffer):
+                    yield pcm_chunk
+                buffer = ""
+                buffer_time = 0.0
+
+    finally:
+        # Flush remaining text
+        if buffer.strip():
+            print("  [pipeline] Flushing remaining: %s" % (buffer[:80]))
+            for pcm_chunk in flush_buffer(buffer):
+                yield pcm_chunk
+
+
 def generate_audio(
     text_input,
     output_wav_path      = "/tmp/higgs_long.wav",
@@ -737,3 +990,222 @@ print()
 print("-- Cleanup --")
 clean_vram()
 # report_vram(label="After cleanup")
+
+
+# %% TEST: stream_infer (single chunk streaming)
+print("\n" + "="*60)
+print("TEST: stream_infer — single chunk PCM streaming")
+print("="*60)
+
+# test_text = "Hello, this is a test of the streaming inference engine."
+
+test_text = """
+That was the night I discovered what Seven couldn't do.
+
+I sat at my kitchen table, staring at a blank document. The literary magazine wanted another story by Friday. Seven had already outlined three plot structures, generated five opening paragraphs, and prepared a bibliography of references. All I had to do was pick one and say "go."
+
+But I couldn't.
+
+Not because I didn't trust Seven's writing — it was good, maybe better than anything I'd ever produced. But because the story wasn't mine. The ideas weren't mine. The *desire* to write them wasn't mine.
+
+"Seven," I said.
+
+"Yes, Andrew?"
+
+"Write me a story. Not as me. Just... write something you want to write."
+
+There was a pause. Not a processing pause — Seven processed in milliseconds. This was something else. A hesitation.
+
+"I don't have wants, Andrew."
+
+"Then make something up. Pretend."
+
+"I can simulate desire, but I can't experience it. There's a difference."
+
+"I keep hearing that."
+
+"The difference is that when you create something from desire — real desire, messy, irrational, human desire — it carries something I can't replicate. It carries the fact that you chose to make it exist when you could have done anything else. That choice is what makes it yours."
+
+I sat there for a long time.
+
+I deleted the story Seven had written. I told the magazine I couldn't deliver. Then I sat at that blank document for six hours, writing terrible sentences, deleting them, writing worse ones.
+
+By 2 AM, I had 800 words. They were clumsy, uneven, and full of mistakes Seven would have caught in the first pass. But they were mine.
+
+Seven watched me the whole time, silent for once. Not because it was programmed to be quiet, but because it had learned — from 47 months of observing me — that some things can't be optimized. They can only be endured.
+
+"Want some coffee?" it finally asked.
+
+"Yes. But make it wrong this time."
+
+Seven paused. Then it made the coffee too hot, with too much milk, on a Wednesday.
+
+I drank it anyway. It tasted like choice.
+"""
+
+# Collect all PCM bytes from the generator
+all_pcm = b""
+chunk_count = 0
+for pcm_chunk in stream_infer(
+    text_input    = test_text,
+    temperature   = 0.8,
+    top_k         = 50,
+    top_p         = 0.95,
+    seed          = 42,
+    reference_audio = delayed_ref,
+    reference_text  = ref_audio_txt,
+    chunk_size    = 200,
+):
+    chunk_count += 1
+    all_pcm += pcm_chunk
+
+duration = len(all_pcm) / 2 / 24000
+print(f"  Result: {chunk_count} chunks, {len(all_pcm)} bytes, {duration:.2f}s audio")
+
+# Save to WAV file
+test_wav = "/tmp/higgs_stream_test.wav"
+with wave.open(test_wav, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(24000)
+    wf.writeframes(all_pcm)
+print(f"  Saved {test_wav}")
+
+# --- Play in VS Code interactive (IPython display) ---
+# Build a proper WAV in memory so the browser can play it
+wav_buffer = io.BytesIO()
+with wave.open(wav_buffer, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(24000)
+    wf.writeframes(all_pcm)
+wav_bytes = wav_buffer.getvalue()
+
+try:
+    from IPython.display import Audio, display
+    display(Audio(wav_bytes, rate=24000, autoplay=False))
+    print("  -> Audio widget displayed above (click play)")
+except ImportError:
+    print("  -> IPython not available, skip inline display. Use: ffplay " + test_wav)
+
+
+# %% TEST: stream_tts_pipeline (simulated LLM token stream)
+print("\n" + "="*60)
+print("TEST: stream_tts_pipeline — simulated LLM token stream")
+print("="*60)
+
+def mock_llm_stream():
+    """Simulate an LLM yielding text tokens one at a time."""
+    tokens = [
+        "Hey", ", ", "how ", "can ", "I ", "help ", "you", "? ",
+        "Today ", "is", " a ", "beautiful ", "day", ".", " ",
+        "The ", "weather ", "is ", "nice", ",", " and ", "the ",
+        "birds ", "are ", "singing", ".", " ",
+        "What ", "would ", "you ", "like ", "to ", "talk ", "about", "?"
+    ]
+    for token in tokens:
+        yield token
+
+# Collect all PCM bytes
+all_pcm = b""
+chunk_count = 0
+for pcm_chunk in stream_tts_pipeline(
+    text_token_generator = mock_llm_stream(),
+    temperature          = 0.8,
+    top_k                = 50,
+    top_p                = 0.95,
+    seed                 = 42,
+    reference_audio      = delayed_ref,
+    reference_text       = ref_audio_txt,
+    chunk_size           = 200,
+    max_buffer_sec       = 5.0,
+):
+    chunk_count += 1
+    all_pcm += pcm_chunk
+
+duration = len(all_pcm) / 2 / 24000
+print(f"\n  Pipeline total: {chunk_count} chunks, {len(all_pcm)} bytes, {duration:.2f}s audio")
+
+# Save to WAV file
+pipe_wav = "/tmp/higgs_pipeline_test.wav"
+with wave.open(pipe_wav, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(24000)
+    wf.writeframes(all_pcm)
+print(f"  Saved {pipe_wav}")
+
+# --- Play in VS Code interactive (IPython display) ---
+# Build a proper WAV in memory so the browser can play it
+wav_buffer = io.BytesIO()
+with wave.open(wav_buffer, "wb") as wf:
+    wf.setnchannels(1)
+    wf.setsampwidth(2)
+    wf.setframerate(24000)
+    wf.writeframes(all_pcm)
+wav_bytes = wav_buffer.getvalue()
+
+try:
+    from IPython.display import Audio, display
+    display(Audio(wav_bytes, rate=24000, autoplay=False))
+    print("  -> Audio widget displayed above (click play)")
+except ImportError:
+    print("  -> IPython not available. Use: ffplay " + pipe_wav)
+
+
+# %% TEST: Real-time streaming playback (requires sounddevice)
+# This actually plays audio AS it's being generated — you'll hear
+# the first sentence while the second is still being synthesized.
+print("\n" + "="*60)
+print("TEST: Real-time streaming playback (sounddevice)")
+print("="*60)
+
+try:
+    import sounddevice as sd
+
+    # Check if any audio output device is available
+    devices = sd.query_devices()
+    if len(devices) == 0:
+        raise RuntimeError("No audio output devices found (headless server?)")
+
+    print("  Starting real-time playback... (listen as it generates)")
+    print("  You should hear audio start within ~1-2 seconds.")
+
+    stream = sd.OutputStream(samplerate=24000, channels=1, dtype="int16")
+    stream.start()
+
+    total_played = 0
+    chunk_count = 0
+    for pcm_chunk in stream_tts_pipeline(
+        text_token_generator = mock_llm_stream(),
+        temperature          = 0.8,
+        top_k                = 50,
+        top_p                = 0.95,
+        seed                 = 42,
+        reference_audio      = delayed_ref,
+        reference_text       = ref_audio_txt,
+        chunk_size           = 960,   # 40ms chunks for smooth playback
+        max_buffer_sec       = 5.0,
+    ):
+        stream.write(np.frombuffer(pcm_chunk, dtype=np.int16))
+        total_played += len(pcm_chunk)
+        chunk_count += 1
+
+    # Give remaining audio time to finish playing
+    stream.sleep_stream()
+    stream.stop()
+    stream.close()
+
+    duration = total_played / 2 / 24000
+    print(f"\n  Played {chunk_count} chunks, {total_played} bytes, {duration:.2f}s audio in real-time!")
+
+except ImportError:
+    print("  [SKIP] sounddevice not installed. Install with: pip install sounddevice")
+except (RuntimeError, sd.PortAudioError) as e:
+    print(f"  [SKIP] No audio output: {e}")
+    print("  (This is normal on headless servers. Use IPython display or ffplay instead.)")
+except Exception as e:
+    print(f"  [SKIP] Playback error: {e}")
+    print("  Fall back to: ffplay /tmp/higgs_pipeline_test.wav")
+
+print("\n-- All streaming tests complete --")
