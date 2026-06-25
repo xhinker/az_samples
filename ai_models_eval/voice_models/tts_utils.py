@@ -7,14 +7,12 @@ import numpy as np
 from pathlib import Path
 
 # --- Text chunking constants ---
-_CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
-_TERMINAL_PUNCT_CHARS = ".!?。！？"
-_WEAK_PUNCT_CHARS = ",;，；、:："
-_SPLIT_HINT_CHARS = _TERMINAL_PUNCT_CHARS + _WEAK_PUNCT_CHARS + "—-"  # NO space — never break mid-phrase
-_CLOSING_QUOTE_CHARS = "\"'”’）)]》」』"
-TEXT_REANCHOR_MAX_WORDS = 28
-TEXT_REANCHOR_TARGET_SECONDS = 12.0
-
+_CJK_CHAR_RE                    = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_TERMINAL_PUNCT_CHARS           = ".!?。！？"
+_WEAK_PUNCT_CHARS               = ",;，；、:："
+_CLOSING_QUOTE_CHARS            = "\"'”’）)]》」』"
+TEXT_REANCHOR_MAX_WORDS         = 28
+TEXT_REANCHOR_TARGET_SECONDS    = 12.0
 
 def _normalize_cjk_spaces(text: str) -> str:
     """Remove spaces only when they are between adjacent CJK characters."""

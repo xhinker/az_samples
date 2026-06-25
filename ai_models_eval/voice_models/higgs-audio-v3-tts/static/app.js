@@ -495,8 +495,13 @@ function _ringPop(count) {
         _streamRingRead = (_streamRingRead + 1) % _streamRingCapacity;
         _streamRingSize--;
     }
-    // Fill remainder with silence
-    for (let i = available; i < count; i++) out[i] = 0;
+    // Underrun: apply micro fade-out to avoid hard audio→silence click
+    if (available < count) {
+        const fadeLen = Math.min(32, available); // Fade last ~1ms of real audio
+        for (let i = 0; i < fadeLen; i++) {
+            out[available - fadeLen + i] *= (fadeLen - i) / fadeLen;
+        }
+    }
     return out;
 }
 
