@@ -1,1 +1,1043 @@
-{"id":"ffefdab9-84ec-4eb0-aead-b1c5b4b96e94","revision":0,"last_node_id":15,"last_link_id":18,"nodes":[{"id":2,"type":"UNETLoader","pos":[-233.12861082121825,251.38615989415607],"size":[490.66526307255447,99.54459842894414],"flags":{},"order":1,"mode":0,"inputs":[{"localized_name":"unet_name","name":"unet_name","type":"COMBO","widget":{"name":"unet_name"},"link":null},{"localized_name":"weight_dtype","name":"weight_dtype","type":"COMBO","widget":{"name":"weight_dtype"},"link":null}],"outputs":[{"localized_name":"MODEL","name":"MODEL","type":"MODEL","links":[2,3]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"UNETLoader"},"widgets_values":["minimax_h3_fl2va_pruned_int8_convrot.safetensors","default"]},{"id":3,"type":"CLIPLoader","pos":[-226.14643565978412,401.6871498614108],"size":[480.97813860013946,111.57623518281275],"flags":{},"order":2,"mode":0,"inputs":[{"localized_name":"clip_name","name":"clip_name","type":"COMBO","widget":{"name":"clip_name"},"link":null},{"localized_name":"type","name":"type","type":"COMBO","widget":{"name":"type"},"link":null},{"localized_name":"device","name":"device","shape":7,"type":"COMBO","widget":{"name":"device"},"link":null}],"outputs":[{"localized_name":"CLIP","name":"CLIP","type":"CLIP","links":[4]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"CLIPLoader"},"widgets_values":["qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors","minimax","default"]},{"id":4,"type":"VAELoader","pos":[-225.73851504626887,579.2396130480781],"size":[480.3721982713254,59.017883495901856],"flags":{},"order":3,"mode":0,"inputs":[{"localized_name":"vae_name","name":"vae_name","type":"COMBO","widget":{"name":"vae_name"},"link":null}],"outputs":[{"localized_name":"VAE","name":"VAE","type":"VAE","links":[5,6]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"VAELoader"},"widgets_values":["minimax_h3_video_vae_fp16.safetensors"]},{"id":5,"type":"VAELoader","pos":[-226.25732670035185,707.9208104990145],"size":[484.6217013616365,59.211942816894634],"flags":{},"order":4,"mode":0,"inputs":[{"localized_name":"vae_name","name":"vae_name","type":"COMBO","widget":{"name":"vae_name"},"link":null}],"outputs":[{"localized_name":"VAE","name":"VAE","type":"VAE","links":[7]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"VAELoader"},"widgets_values":["minimax_h3_audio_vae_fp32.safetensors"]},{"id":1,"type":"LoadImage","pos":[-146.90331787253828,-147.3524345076247],"size":[300,314],"flags":{},"order":5,"mode":0,"inputs":[{"localized_name":"image","name":"image","type":"COMBO","widget":{"name":"image"},"link":null},{"localized_name":"choose file to upload","name":"upload","type":"IMAGEUPLOAD","widget":{"name":"upload"},"link":null}],"outputs":[{"localized_name":"IMAGE","name":"IMAGE","type":"IMAGE","links":[1]},{"localized_name":"MASK","name":"MASK","type":"MASK","links":[]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"LoadImage"},"widgets_values":["img2img_output_seed_2006.png","image"]},{"id":6,"type":"MiniMaxH3ImageToVideo","pos":[310.44016334229127,-247.95186476994112],"size":[324.25921530332687,380.56878659806637],"flags":{},"order":8,"mode":0,"inputs":[{"localized_name":"clip","name":"clip","type":"CLIP","link":4},{"localized_name":"vae","name":"vae","type":"VAE","link":5},{"localized_name":"first_frame","name":"first_frame","shape":7,"type":"IMAGE","link":1},{"localized_name":"last_frame","name":"last_frame","shape":7,"type":"IMAGE","link":null},{"localized_name":"prompt","name":"prompt","type":"STRING","widget":{"name":"prompt"},"link":null},{"localized_name":"width","name":"width","type":"INT","widget":{"name":"width"},"link":null},{"localized_name":"height","name":"height","type":"INT","widget":{"name":"height"},"link":null},{"localized_name":"length","name":"length","type":"INT","widget":{"name":"length"},"link":null}],"outputs":[{"localized_name":"positive","name":"positive","type":"CONDITIONING","links":[8]},{"localized_name":"LATENT","name":"LATENT","type":"LATENT","links":[9]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"MiniMaxH3ImageToVideo"},"widgets_values":["A professional fashion model walking on a bright catwalk stage, full of charm and confidence. striding gracefully down the runway with perfect posture and poise. She pauses, leans slightly left then right. She then turns around and walks back down the catwalk with effortless grace. The stage is lit by dramatic spotlights, with a stylish fashion show atmosphere, audience in the background.\n\nAudio: fashion show music, rhythmic footsteps on the runway, subtle crowd ambiance.",800,1120,209]},{"id":7,"type":"KSamplerSelect","pos":[325.96579114580067,200.23356482400814],"size":[310.3405895329007,78.16242957098518],"flags":{},"order":0,"mode":0,"inputs":[{"localized_name":"sampler_name","name":"sampler_name","type":"COMBO","widget":{"name":"sampler_name"},"link":null}],"outputs":[{"localized_name":"SAMPLER","name":"SAMPLER","type":"SAMPLER","links":[10]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"KSamplerSelect"},"widgets_values":["res_multistep"]},{"id":8,"type":"BasicScheduler","pos":[335.3901868956176,324.41999438058565],"size":[300.799999649807,132.847554147888],"flags":{},"order":7,"mode":0,"inputs":[{"localized_name":"model","name":"model","type":"MODEL","link":2},{"localized_name":"scheduler","name":"scheduler","type":"COMBO","widget":{"name":"scheduler"},"link":null},{"localized_name":"steps","name":"steps","type":"INT","widget":{"name":"steps"},"link":null},{"localized_name":"denoise","name":"denoise","type":"FLOAT","widget":{"name":"denoise"},"link":null}],"outputs":[{"localized_name":"SIGMAS","name":"SIGMAS","type":"SIGMAS","links":[11]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"BasicScheduler"},"widgets_values":["simple",20,1]},{"id":11,"type":"SamplerCustomAdvanced","pos":[756.2224761695672,221.79738986057393],"size":[295.77242957335534,124.85783487304286],"flags":{},"order":10,"mode":0,"inputs":[{"localized_name":"noise","name":"noise","type":"NOISE","link":13},{"localized_name":"guider","name":"guider","type":"GUIDER","link":12},{"localized_name":"sampler","name":"sampler","type":"SAMPLER","link":10},{"localized_name":"sigmas","name":"sigmas","type":"SIGMAS","link":11},{"localized_name":"latent_image","name":"latent_image","type":"LATENT","link":9}],"outputs":[{"localized_name":"output","name":"output","type":"LATENT","links":[14,15]},{"localized_name":"denoised_output","name":"denoised_output","type":"LATENT","links":[]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"SamplerCustomAdvanced"},"widgets_values":[]},{"id":12,"type":"VAEDecode","pos":[739.9473638376115,81.69924280573998],"size":[301.91287044978594,55.69907306749508],"flags":{},"order":11,"mode":0,"inputs":[{"localized_name":"samples","name":"samples","type":"LATENT","link":14},{"localized_name":"vae","name":"vae","type":"VAE","link":6}],"outputs":[{"localized_name":"IMAGE","name":"IMAGE","type":"IMAGE","links":[16]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"VAEDecode"},"widgets_values":[]},{"id":13,"type":"VAEDecodeAudio","pos":[756.9765358525733,437.2079422407167],"size":[300.0712870975076,46],"flags":{},"order":12,"mode":0,"inputs":[{"localized_name":"samples","name":"samples","type":"LATENT","link":15},{"localized_name":"vae","name":"vae","type":"VAE","link":7}],"outputs":[{"localized_name":"AUDIO","name":"AUDIO","type":"AUDIO","links":[17]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"VAEDecodeAudio"},"widgets_values":[]},{"id":14,"type":"CreateVideo","pos":[1122.4707206717017,-254.75775816587202],"size":[300,200],"flags":{},"order":13,"mode":0,"inputs":[{"localized_name":"images","name":"images","type":"IMAGE","link":16},{"localized_name":"audio","name":"audio","shape":7,"type":"AUDIO","link":17},{"localized_name":"fps","name":"fps","type":"FLOAT","widget":{"name":"fps"},"link":null},{"localized_name":"bit_depth","name":"bit_depth","shape":7,"type":"INT","widget":{"name":"bit_depth"},"link":null}],"outputs":[{"localized_name":"VIDEO","name":"VIDEO","type":"VIDEO","links":[18]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"CreateVideo"},"widgets_values":[24,8]},{"id":15,"type":"SaveVideo","pos":[1123.0279910124723,78.25455646306732],"size":[611.1016459961147,953.5423043945606],"flags":{},"order":14,"mode":0,"inputs":[{"localized_name":"video","name":"video","type":"VIDEO","link":18},{"localized_name":"filename_prefix","name":"filename_prefix","type":"STRING","widget":{"name":"filename_prefix"},"link":null},{"localized_name":"format","name":"format","type":"COMBO","widget":{"name":"format"},"link":null},{"localized_name":"codec","name":"codec","type":"COMFY_DYNAMICCOMBO_V3","widget":{"name":"codec"},"link":null}],"outputs":[{"localized_name":"video","name":"video","type":"VIDEO","links":[]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"SaveVideo"},"widgets_values":["video/minimax_h3_i2v","auto","auto"]},{"id":9,"type":"BasicGuider","pos":[329.9446048782266,512.4660099484971],"size":[302.364355400667,84.64559504986619],"flags":{},"order":9,"mode":0,"inputs":[{"localized_name":"model","name":"model","type":"MODEL","link":3},{"localized_name":"conditioning","name":"conditioning","type":"CONDITIONING","link":8}],"outputs":[{"localized_name":"GUIDER","name":"GUIDER","type":"GUIDER","links":[12]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"BasicGuider"},"widgets_values":[]},{"id":10,"type":"RandomNoise","pos":[322.04197142086764,664.5881526453795],"size":[326.6653348621297,88.71688039640856],"flags":{},"order":6,"mode":0,"inputs":[{"localized_name":"noise_seed","name":"noise_seed","type":"INT","widget":{"name":"noise_seed"},"link":null}],"outputs":[{"localized_name":"NOISE","name":"NOISE","type":"NOISE","links":[13]}],"properties":{"cnr_id":"comfy-core","ver":"0.30.0","Node name for S&R":"RandomNoise"},"widgets_values":[56108488972625,"randomize"]}],"links":[[1,1,0,6,2,"IMAGE"],[2,2,0,8,0,"MODEL"],[3,2,0,9,0,"MODEL"],[4,3,0,6,0,"CLIP"],[5,4,0,6,1,"VAE"],[6,4,0,12,1,"VAE"],[7,5,0,13,1,"VAE"],[8,6,0,9,1,"CONDITIONING"],[9,6,1,11,4,"LATENT"],[10,7,0,11,2,"SAMPLER"],[11,8,0,11,3,"SIGMAS"],[12,9,0,11,1,"GUIDER"],[13,10,0,11,0,"NOISE"],[14,11,0,12,0,"LATENT"],[15,11,0,13,0,"LATENT"],[16,12,0,14,0,"IMAGE"],[17,13,0,14,1,"AUDIO"],[18,14,0,15,0,"VIDEO"]],"groups":[],"config":{},"extra":{"ds":{"scale":0.41829959185331367,"offset":[826.1875391889156,719.1747790539761]}},"version":0.4}
+{
+    "id": "ffefdab9-84ec-4eb0-aead-b1c5b4b96e94",
+    "revision": 0,
+    "last_node_id": 15,
+    "last_link_id": 18,
+    "nodes": [
+        {
+            "id": 2,
+            "type": "UNETLoader",
+            "pos": [
+                -233.12861082121825,
+                251.38615989415607
+            ],
+            "size": [
+                490.66526307255447,
+                99.54459842894414
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "unet_name",
+                    "name": "unet_name",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "unet_name"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "weight_dtype",
+                    "name": "weight_dtype",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "weight_dtype"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "MODEL",
+                    "name": "MODEL",
+                    "type": "MODEL",
+                    "links": [
+                        2,
+                        3
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "UNETLoader"
+            },
+            "widgets_values": [
+                "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+                "default"
+            ]
+        },
+        {
+            "id": 3,
+            "type": "CLIPLoader",
+            "pos": [
+                -226.14643565978412,
+                401.6871498614108
+            ],
+            "size": [
+                480.97813860013946,
+                111.57623518281275
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "clip_name",
+                    "name": "clip_name",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "clip_name"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "type",
+                    "name": "type",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "type"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "device",
+                    "name": "device",
+                    "shape": 7,
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "device"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "CLIP",
+                    "name": "CLIP",
+                    "type": "CLIP",
+                    "links": [
+                        4
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "CLIPLoader"
+            },
+            "widgets_values": [
+                "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+                "minimax",
+                "default"
+            ]
+        },
+        {
+            "id": 4,
+            "type": "VAELoader",
+            "pos": [
+                -225.73851504626887,
+                579.2396130480781
+            ],
+            "size": [
+                480.3721982713254,
+                59.017883495901856
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "vae_name",
+                    "name": "vae_name",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "vae_name"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "VAE",
+                    "name": "VAE",
+                    "type": "VAE",
+                    "links": [
+                        5,
+                        6
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "VAELoader"
+            },
+            "widgets_values": [
+                "minimax_h3_video_vae_fp16.safetensors"
+            ]
+        },
+        {
+            "id": 5,
+            "type": "VAELoader",
+            "pos": [
+                -226.25732670035185,
+                707.9208104990145
+            ],
+            "size": [
+                484.6217013616365,
+                59.211942816894634
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "vae_name",
+                    "name": "vae_name",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "vae_name"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "VAE",
+                    "name": "VAE",
+                    "type": "VAE",
+                    "links": [
+                        7
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "VAELoader"
+            },
+            "widgets_values": [
+                "minimax_h3_audio_vae_fp32.safetensors"
+            ]
+        },
+        {
+            "id": 1,
+            "type": "LoadImage",
+            "pos": [
+                -146.90331787253828,
+                -147.3524345076247
+            ],
+            "size": [
+                300,
+                314
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "image",
+                    "name": "image",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "image"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "choose file to upload",
+                    "name": "upload",
+                    "type": "IMAGEUPLOAD",
+                    "widget": {
+                        "name": "upload"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "IMAGE",
+                    "name": "IMAGE",
+                    "type": "IMAGE",
+                    "links": [
+                        1
+                    ]
+                },
+                {
+                    "localized_name": "MASK",
+                    "name": "MASK",
+                    "type": "MASK",
+                    "links": []
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "LoadImage"
+            },
+            "widgets_values": [
+                "img2img_output_seed_2006.png",
+                "image"
+            ]
+        },
+        {
+            "id": 6,
+            "type": "MiniMaxH3ImageToVideo",
+            "pos": [
+                310.44016334229127,
+                -247.95186476994112
+            ],
+            "size": [
+                324.25921530332687,
+                380.56878659806637
+            ],
+            "flags": {},
+            "order": 8,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "clip",
+                    "name": "clip",
+                    "type": "CLIP",
+                    "link": 4
+                },
+                {
+                    "localized_name": "vae",
+                    "name": "vae",
+                    "type": "VAE",
+                    "link": 5
+                },
+                {
+                    "localized_name": "first_frame",
+                    "name": "first_frame",
+                    "shape": 7,
+                    "type": "IMAGE",
+                    "link": 1
+                },
+                {
+                    "localized_name": "last_frame",
+                    "name": "last_frame",
+                    "shape": 7,
+                    "type": "IMAGE",
+                    "link": null
+                },
+                {
+                    "localized_name": "prompt",
+                    "name": "prompt",
+                    "type": "STRING",
+                    "widget": {
+                        "name": "prompt"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "width",
+                    "name": "width",
+                    "type": "INT",
+                    "widget": {
+                        "name": "width"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "height",
+                    "name": "height",
+                    "type": "INT",
+                    "widget": {
+                        "name": "height"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "length",
+                    "name": "length",
+                    "type": "INT",
+                    "widget": {
+                        "name": "length"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "positive",
+                    "name": "positive",
+                    "type": "CONDITIONING",
+                    "links": [
+                        8
+                    ]
+                },
+                {
+                    "localized_name": "LATENT",
+                    "name": "LATENT",
+                    "type": "LATENT",
+                    "links": [
+                        9
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "MiniMaxH3ImageToVideo"
+            },
+            "widgets_values": [
+                "A professional fashion model walking on a bright catwalk stage, full of charm and confidence. striding gracefully down the runway with perfect posture and poise. She pauses, leans slightly left then right. She then turns around and walks back down the catwalk with effortless grace. The stage is lit by dramatic spotlights, with a stylish fashion show atmosphere, audience in the background.\n\nAudio: fashion show music, rhythmic footsteps on the runway, subtle crowd ambiance.",
+                800,
+                1120,
+                209
+            ]
+        },
+        {
+            "id": 7,
+            "type": "KSamplerSelect",
+            "pos": [
+                325.96579114580067,
+                200.23356482400814
+            ],
+            "size": [
+                310.3405895329007,
+                78.16242957098518
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "sampler_name",
+                    "name": "sampler_name",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "sampler_name"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "SAMPLER",
+                    "name": "SAMPLER",
+                    "type": "SAMPLER",
+                    "links": [
+                        10
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "KSamplerSelect"
+            },
+            "widgets_values": [
+                "res_multistep"
+            ]
+        },
+        {
+            "id": 8,
+            "type": "BasicScheduler",
+            "pos": [
+                335.3901868956176,
+                324.41999438058565
+            ],
+            "size": [
+                300.799999649807,
+                132.847554147888
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "model",
+                    "name": "model",
+                    "type": "MODEL",
+                    "link": 2
+                },
+                {
+                    "localized_name": "scheduler",
+                    "name": "scheduler",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "scheduler"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "steps",
+                    "name": "steps",
+                    "type": "INT",
+                    "widget": {
+                        "name": "steps"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "denoise",
+                    "name": "denoise",
+                    "type": "FLOAT",
+                    "widget": {
+                        "name": "denoise"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "SIGMAS",
+                    "name": "SIGMAS",
+                    "type": "SIGMAS",
+                    "links": [
+                        11
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "BasicScheduler"
+            },
+            "widgets_values": [
+                "simple",
+                20,
+                1
+            ]
+        },
+        {
+            "id": 11,
+            "type": "SamplerCustomAdvanced",
+            "pos": [
+                756.2224761695672,
+                221.79738986057393
+            ],
+            "size": [
+                295.77242957335534,
+                124.85783487304286
+            ],
+            "flags": {},
+            "order": 10,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "noise",
+                    "name": "noise",
+                    "type": "NOISE",
+                    "link": 13
+                },
+                {
+                    "localized_name": "guider",
+                    "name": "guider",
+                    "type": "GUIDER",
+                    "link": 12
+                },
+                {
+                    "localized_name": "sampler",
+                    "name": "sampler",
+                    "type": "SAMPLER",
+                    "link": 10
+                },
+                {
+                    "localized_name": "sigmas",
+                    "name": "sigmas",
+                    "type": "SIGMAS",
+                    "link": 11
+                },
+                {
+                    "localized_name": "latent_image",
+                    "name": "latent_image",
+                    "type": "LATENT",
+                    "link": 9
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "output",
+                    "name": "output",
+                    "type": "LATENT",
+                    "links": [
+                        14,
+                        15
+                    ]
+                },
+                {
+                    "localized_name": "denoised_output",
+                    "name": "denoised_output",
+                    "type": "LATENT",
+                    "links": []
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "SamplerCustomAdvanced"
+            },
+            "widgets_values": []
+        },
+        {
+            "id": 12,
+            "type": "VAEDecode",
+            "pos": [
+                739.9473638376115,
+                81.69924280573998
+            ],
+            "size": [
+                301.91287044978594,
+                55.69907306749508
+            ],
+            "flags": {},
+            "order": 11,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "samples",
+                    "name": "samples",
+                    "type": "LATENT",
+                    "link": 14
+                },
+                {
+                    "localized_name": "vae",
+                    "name": "vae",
+                    "type": "VAE",
+                    "link": 6
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "IMAGE",
+                    "name": "IMAGE",
+                    "type": "IMAGE",
+                    "links": [
+                        16
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "VAEDecode"
+            },
+            "widgets_values": []
+        },
+        {
+            "id": 13,
+            "type": "VAEDecodeAudio",
+            "pos": [
+                756.9765358525733,
+                437.2079422407167
+            ],
+            "size": [
+                300.0712870975076,
+                46
+            ],
+            "flags": {},
+            "order": 12,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "samples",
+                    "name": "samples",
+                    "type": "LATENT",
+                    "link": 15
+                },
+                {
+                    "localized_name": "vae",
+                    "name": "vae",
+                    "type": "VAE",
+                    "link": 7
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "AUDIO",
+                    "name": "AUDIO",
+                    "type": "AUDIO",
+                    "links": [
+                        17
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "VAEDecodeAudio"
+            },
+            "widgets_values": []
+        },
+        {
+            "id": 14,
+            "type": "CreateVideo",
+            "pos": [
+                1122.4707206717017,
+                -254.75775816587202
+            ],
+            "size": [
+                300,
+                200
+            ],
+            "flags": {},
+            "order": 13,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "images",
+                    "name": "images",
+                    "type": "IMAGE",
+                    "link": 16
+                },
+                {
+                    "localized_name": "audio",
+                    "name": "audio",
+                    "shape": 7,
+                    "type": "AUDIO",
+                    "link": 17
+                },
+                {
+                    "localized_name": "fps",
+                    "name": "fps",
+                    "type": "FLOAT",
+                    "widget": {
+                        "name": "fps"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "bit_depth",
+                    "name": "bit_depth",
+                    "shape": 7,
+                    "type": "INT",
+                    "widget": {
+                        "name": "bit_depth"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "VIDEO",
+                    "name": "VIDEO",
+                    "type": "VIDEO",
+                    "links": [
+                        18
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "CreateVideo"
+            },
+            "widgets_values": [
+                24,
+                8
+            ]
+        },
+        {
+            "id": 15,
+            "type": "SaveVideo",
+            "pos": [
+                1123.0279910124723,
+                78.25455646306732
+            ],
+            "size": [
+                611.1016459961147,
+                953.5423043945606
+            ],
+            "flags": {},
+            "order": 14,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "video",
+                    "name": "video",
+                    "type": "VIDEO",
+                    "link": 18
+                },
+                {
+                    "localized_name": "filename_prefix",
+                    "name": "filename_prefix",
+                    "type": "STRING",
+                    "widget": {
+                        "name": "filename_prefix"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "format",
+                    "name": "format",
+                    "type": "COMBO",
+                    "widget": {
+                        "name": "format"
+                    },
+                    "link": null
+                },
+                {
+                    "localized_name": "codec",
+                    "name": "codec",
+                    "type": "COMFY_DYNAMICCOMBO_V3",
+                    "widget": {
+                        "name": "codec"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "video",
+                    "name": "video",
+                    "type": "VIDEO",
+                    "links": []
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "SaveVideo"
+            },
+            "widgets_values": [
+                "video/minimax_h3_i2v",
+                "auto",
+                "auto"
+            ]
+        },
+        {
+            "id": 9,
+            "type": "BasicGuider",
+            "pos": [
+                329.9446048782266,
+                512.4660099484971
+            ],
+            "size": [
+                302.364355400667,
+                84.64559504986619
+            ],
+            "flags": {},
+            "order": 9,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "model",
+                    "name": "model",
+                    "type": "MODEL",
+                    "link": 3
+                },
+                {
+                    "localized_name": "conditioning",
+                    "name": "conditioning",
+                    "type": "CONDITIONING",
+                    "link": 8
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "GUIDER",
+                    "name": "GUIDER",
+                    "type": "GUIDER",
+                    "links": [
+                        12
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "BasicGuider"
+            },
+            "widgets_values": []
+        },
+        {
+            "id": 10,
+            "type": "RandomNoise",
+            "pos": [
+                322.04197142086764,
+                664.5881526453795
+            ],
+            "size": [
+                326.6653348621297,
+                88.71688039640856
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+                {
+                    "localized_name": "noise_seed",
+                    "name": "noise_seed",
+                    "type": "INT",
+                    "widget": {
+                        "name": "noise_seed"
+                    },
+                    "link": null
+                }
+            ],
+            "outputs": [
+                {
+                    "localized_name": "NOISE",
+                    "name": "NOISE",
+                    "type": "NOISE",
+                    "links": [
+                        13
+                    ]
+                }
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.30.0",
+                "Node name for S&R": "RandomNoise"
+            },
+            "widgets_values": [
+                56108488972625,
+                "randomize"
+            ]
+        }
+    ],
+    "links": [
+        [
+            1,
+            1,
+            0,
+            6,
+            2,
+            "IMAGE"
+        ],
+        [
+            2,
+            2,
+            0,
+            8,
+            0,
+            "MODEL"
+        ],
+        [
+            3,
+            2,
+            0,
+            9,
+            0,
+            "MODEL"
+        ],
+        [
+            4,
+            3,
+            0,
+            6,
+            0,
+            "CLIP"
+        ],
+        [
+            5,
+            4,
+            0,
+            6,
+            1,
+            "VAE"
+        ],
+        [
+            6,
+            4,
+            0,
+            12,
+            1,
+            "VAE"
+        ],
+        [
+            7,
+            5,
+            0,
+            13,
+            1,
+            "VAE"
+        ],
+        [
+            8,
+            6,
+            0,
+            9,
+            1,
+            "CONDITIONING"
+        ],
+        [
+            9,
+            6,
+            1,
+            11,
+            4,
+            "LATENT"
+        ],
+        [
+            10,
+            7,
+            0,
+            11,
+            2,
+            "SAMPLER"
+        ],
+        [
+            11,
+            8,
+            0,
+            11,
+            3,
+            "SIGMAS"
+        ],
+        [
+            12,
+            9,
+            0,
+            11,
+            1,
+            "GUIDER"
+        ],
+        [
+            13,
+            10,
+            0,
+            11,
+            0,
+            "NOISE"
+        ],
+        [
+            14,
+            11,
+            0,
+            12,
+            0,
+            "LATENT"
+        ],
+        [
+            15,
+            11,
+            0,
+            13,
+            0,
+            "LATENT"
+        ],
+        [
+            16,
+            12,
+            0,
+            14,
+            0,
+            "IMAGE"
+        ],
+        [
+            17,
+            13,
+            0,
+            14,
+            1,
+            "AUDIO"
+        ],
+        [
+            18,
+            14,
+            0,
+            15,
+            0,
+            "VIDEO"
+        ]
+    ],
+    "groups": [],
+    "config": {},
+    "extra": {
+        "ds": {
+            "scale": 0.41829959185331367,
+            "offset": [
+                826.1875391889156,
+                719.1747790539761
+            ]
+        }
+    },
+    "version": 0.4
+}
